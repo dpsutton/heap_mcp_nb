@@ -417,34 +417,99 @@ public class HeapDumpService {
         return new ArrayElementInfo(index, getClassName(element), element.getInstanceId(), resolveInlineValue(element));
     }
 
-    public ArrayElementInfo getArrayElement(long id, int index) {
-        if (heap == null) throw new IllegalStateException("Heap not loaded");
-        Instance instance = heap.getInstanceByID(id);
-        if (instance == null) throw new IllegalArgumentException("Instance not found: " + id);
+    /**
+     * Extract the backing Object[] values and logical length from an instance.
+     * Supports: Object[], ArrayList, PersistentVector (flattened), PersistentVector$Node (array field).
+     */
+    private record ArrayBacking(List<Instance> values, int length) {}
 
+    private ArrayBacking resolveArrayBacking(Instance instance) {
         if (instance instanceof ObjectArrayInstance) {
             ObjectArrayInstance arr = (ObjectArrayInstance) instance;
-            if (index < 0 || index >= arr.getLength()) {
-                throw new IndexOutOfBoundsException("Index " + index + " out of bounds for array of length " + arr.getLength());
-            }
-            return makeArrayElementInfo(index, ((List<Instance>) arr.getValues()).get(index));
+            return new ArrayBacking(arr.getValues(), arr.getLength());
         }
 
         String className = getClassName(instance);
+
         if (className.equals("java.util.ArrayList")) {
             Object elementData = instance.getValueOfField("elementData");
             if (elementData instanceof ObjectArrayInstance) {
                 ObjectArrayInstance arr = (ObjectArrayInstance) elementData;
                 Object sizeObj = instance.getValueOfField("size");
                 int size = (sizeObj instanceof Number) ? ((Number) sizeObj).intValue() : arr.getLength();
-                if (index < 0 || index >= size) {
-                    throw new IndexOutOfBoundsException("Index " + index + " out of bounds for ArrayList of size " + size);
-                }
-                return makeArrayElementInfo(index, ((List<Instance>) arr.getValues()).get(index));
+                return new ArrayBacking(arr.getValues(), size);
             }
         }
 
-        throw new IllegalArgumentException("Instance " + id + " is not an array or ArrayList, it is: " + className);
+        if (className.equals("clojure.lang.PersistentVector") || className.equals("clojure.lang.PersistentVector$TransientVector")) {
+            // Flatten the trie: walk root node tree + tail
+            List<Instance> flat = new ArrayList<>();
+            Object rootNode = instance.getValueOfField("root");
+            Object shiftObj = instance.getValueOfField("shift");
+            int shift = (shiftObj instanceof Number) ? ((Number) shiftObj).intValue() : 5;
+            if (rootNode instanceof Instance) {
+                flattenVectorNode((Instance) rootNode, shift, flat);
+            }
+            Object tail = instance.getValueOfField("tail");
+            if (tail instanceof ObjectArrayInstance) {
+                for (Instance elem : (List<Instance>) ((ObjectArrayInstance) tail).getValues()) {
+                    flat.add(elem);
+                }
+            }
+            Object cntObj = instance.getValueOfField("cnt");
+            int cnt = (cntObj instanceof Number) ? ((Number) cntObj).intValue() : flat.size();
+            // Trim to actual count (tail array may have nulls beyond cnt)
+            if (flat.size() > cnt) flat = flat.subList(0, cnt);
+            return new ArrayBacking(flat, cnt);
+        }
+
+        if (className.equals("clojure.lang.PersistentVector$Node")) {
+            // Just expose the node's array field directly
+            Object arrayObj = instance.getValueOfField("array");
+            if (arrayObj instanceof ObjectArrayInstance) {
+                ObjectArrayInstance arr = (ObjectArrayInstance) arrayObj;
+                List<Instance> values = arr.getValues();
+                // Filter out trailing nulls
+                int len = values.size();
+                while (len > 0 && values.get(len - 1) == null) len--;
+                return new ArrayBacking(values.subList(0, len), len);
+            }
+        }
+
+        throw new IllegalArgumentException("Instance " + instance.getInstanceId() +
+                " is not an array, ArrayList, or PersistentVector, it is: " + className);
+    }
+
+    private void flattenVectorNode(Instance node, int shift, List<Instance> result) {
+        Object arrayObj = node.getValueOfField("array");
+        if (!(arrayObj instanceof ObjectArrayInstance)) return;
+        List<Instance> arr = ((ObjectArrayInstance) arrayObj).getValues();
+
+        if (shift == 0) {
+            // Leaf node — elements are the actual values
+            for (Instance elem : arr) {
+                result.add(elem);
+            }
+        } else {
+            // Internal node — children are sub-nodes
+            for (Instance child : arr) {
+                if (child != null) {
+                    flattenVectorNode(child, shift - 5, result);
+                }
+            }
+        }
+    }
+
+    public ArrayElementInfo getArrayElement(long id, int index) {
+        if (heap == null) throw new IllegalStateException("Heap not loaded");
+        Instance instance = heap.getInstanceByID(id);
+        if (instance == null) throw new IllegalArgumentException("Instance not found: " + id);
+
+        ArrayBacking backing = resolveArrayBacking(instance);
+        if (index < 0 || index >= backing.length) {
+            throw new IndexOutOfBoundsException("Index " + index + " out of bounds for length " + backing.length);
+        }
+        return makeArrayElementInfo(index, backing.values.get(index));
     }
 
     public List<ArrayElementInfo> getArrayElements(long id, int from, int to) {
@@ -452,31 +517,12 @@ public class HeapDumpService {
         Instance instance = heap.getInstanceByID(id);
         if (instance == null) throw new IllegalArgumentException("Instance not found: " + id);
 
-        List<Instance> values;
-        int length;
-
-        if (instance instanceof ObjectArrayInstance) {
-            ObjectArrayInstance arr = (ObjectArrayInstance) instance;
-            values = arr.getValues();
-            length = arr.getLength();
-        } else if (getClassName(instance).equals("java.util.ArrayList")) {
-            Object elementData = instance.getValueOfField("elementData");
-            if (!(elementData instanceof ObjectArrayInstance)) {
-                throw new IllegalArgumentException("ArrayList elementData is not an object array");
-            }
-            ObjectArrayInstance arr = (ObjectArrayInstance) elementData;
-            values = arr.getValues();
-            Object sizeObj = instance.getValueOfField("size");
-            length = (sizeObj instanceof Number) ? ((Number) sizeObj).intValue() : arr.getLength();
-        } else {
-            throw new IllegalArgumentException("Instance " + id + " is not an array or ArrayList, it is: " + getClassName(instance));
-        }
-
-        int safeFrom = Math.max(0, Math.min(from, length));
-        int safeTo = Math.max(safeFrom, Math.min(to, length));
+        ArrayBacking backing = resolveArrayBacking(instance);
+        int safeFrom = Math.max(0, Math.min(from, backing.length));
+        int safeTo = Math.max(safeFrom, Math.min(to, backing.length));
         List<ArrayElementInfo> result = new ArrayList<>();
         for (int i = safeFrom; i < safeTo; i++) {
-            result.add(makeArrayElementInfo(i, values.get(i)));
+            result.add(makeArrayElementInfo(i, backing.values.get(i)));
         }
         return result;
     }
