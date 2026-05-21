@@ -574,8 +574,7 @@ public class HeapDumpService {
                         stackTrace = threadRoot.getStackTrace();
                         Instance threadInst = threadRoot.getInstance();
                         if (threadInst != null) {
-                            Object name = threadInst.getValueOfField("name");
-                            if (name != null) threadName = name.toString();
+                            threadName = resolveThreadName(threadInst);
                         }
                     }
                 } else if (gcRoot instanceof ThreadObjectGCRoot) {
@@ -583,8 +582,7 @@ public class HeapDumpService {
                     stackTrace = threadRoot.getStackTrace();
                     Instance threadInst = threadRoot.getInstance();
                     if (threadInst != null) {
-                        Object name = threadInst.getValueOfField("name");
-                        if (name != null) threadName = name.toString();
+                        threadName = resolveThreadName(threadInst);
                     }
                 }
             }
@@ -617,9 +615,7 @@ public class HeapDumpService {
                 ThreadObjectGCRoot threadRoot = (ThreadObjectGCRoot) root;
                 Instance inst = threadRoot.getInstance();
                 if (inst != null && !threads.containsKey(inst.getInstanceId())) {
-                    String name = null;
-                    Object nameObj = inst.getValueOfField("name");
-                    if (nameObj != null) name = nameObj.toString();
+                    String name = resolveThreadName(inst);
                     threads.put(inst.getInstanceId(), new ThreadInfo(
                             inst.getInstanceId(),
                             name,
@@ -629,6 +625,22 @@ public class HeapDumpService {
             }
         }
         return new ArrayList<>(threads.values());
+    }
+
+    private String resolveThreadName(Instance threadInstance) {
+        Object nameObj = threadInstance.getValueOfField("name");
+        if (nameObj instanceof Instance) {
+            Instance nameInst = (Instance) nameObj;
+            if (getClassName(nameInst).equals("java.lang.String")) {
+                try {
+                    return getStringValue(nameInst.getInstanceId());
+                } catch (Exception e) {
+                    // fall through
+                }
+            }
+        }
+        if (nameObj != null) return nameObj.toString();
+        return null;
     }
 
     // === Task #5: Map entry walking ===
