@@ -895,7 +895,10 @@ public class HeapDumpTools {
     public SyncToolSpecification getGCRootForTool() {
         McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
                 "object",
-                Map.of("id", new McpSchema.JsonSchema("integer", null, null, false, null, null)),
+                Map.of(
+                        "id", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "max_frames", new McpSchema.JsonSchema("integer", null, null, false, null, null)
+                ),
                 List.of("id"),
                 false, null, null
         );
@@ -903,7 +906,7 @@ public class HeapDumpTools {
         McpSchema.Tool tool = new McpSchema.Tool(
                 "get_gc_root_for",
                 "Get GC Root For Object",
-                "Given an object ID, traces the path to its nearest GC root. Shows which root kind holds it alive, the thread name, frame number, and stack trace.",
+                "Given an object ID, traces the path to its nearest GC root. Shows which root kind holds it alive, the thread name, frame number, and stack trace. Use max_frames to limit stack depth (default 50).",
                 inputSchema,
                 null, null, null
         );
@@ -912,6 +915,9 @@ public class HeapDumpTools {
             Map<String, Object> args = request.arguments();
             try {
                 long id = ((Number) args.get("id")).longValue();
+                Number maxFramesObj = (Number) args.get("max_frames");
+                int maxFrames = (maxFramesObj != null) ? maxFramesObj.intValue() : 50;
+
                 HeapDumpService.GCRootPathInfo info = heapDumpService.getGCRootFor(id);
                 StringBuilder sb = new StringBuilder();
                 sb.append("Path to GC root:\n");
@@ -929,9 +935,13 @@ public class HeapDumpTools {
                     sb.append("Frame Number: ").append(info.frameNumber).append("\n");
                 }
                 if (info.stackTrace != null && info.stackTrace.length > 0) {
+                    int framesToShow = Math.min(maxFrames, info.stackTrace.length);
                     sb.append("Stack Trace:\n");
-                    for (StackTraceElement frame : info.stackTrace) {
-                        sb.append("  at ").append(frame).append("\n");
+                    for (int i = 0; i < framesToShow; i++) {
+                        sb.append("  at ").append(info.stackTrace[i]).append("\n");
+                    }
+                    if (info.stackTrace.length > framesToShow) {
+                        sb.append(String.format("  ... %d more frames\n", info.stackTrace.length - framesToShow));
                     }
                 }
                 return McpSchema.CallToolResult.builder()
@@ -945,26 +955,55 @@ public class HeapDumpTools {
     }
 
     public SyncToolSpecification getThreadsTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of(
+                        "from", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "to", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "max_frames", new McpSchema.JsonSchema("integer", null, null, false, null, null)
+                ),
+                List.of(),
+                false, null, null
+        );
+
         McpSchema.Tool tool = new McpSchema.Tool(
                 "get_threads",
                 "Get Threads",
-                "Returns all threads from the heap dump with their names and stack traces.",
-                new McpSchema.JsonSchema("object", Map.of(), List.of(), false, null, null),
+                "Returns threads from the heap dump with names and stack traces. Paginated (default 0-50). " +
+                "Use max_frames to limit stack trace depth (default 20). Use get_instance_by_id on a thread ID for full details.",
+                inputSchema,
                 null, null, null
         );
 
         return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
             try {
-                List<HeapDumpService.ThreadInfo> threads = heapDumpService.getThreads();
+                Number fromObj = args != null ? (Number) args.get("from") : null;
+                Number toObj = args != null ? (Number) args.get("to") : null;
+                Number maxFramesObj = args != null ? (Number) args.get("max_frames") : null;
+                int from = (fromObj != null) ? fromObj.intValue() : 0;
+                int to = (toObj != null) ? toObj.intValue() : 50;
+                int maxFrames = (maxFramesObj != null) ? maxFramesObj.intValue() : 20;
+
+                List<HeapDumpService.ThreadInfo> allThreads = heapDumpService.getThreads();
+                int safeTo = Math.min(to, allThreads.size());
+                int safeFrom = Math.min(from, safeTo);
+                List<HeapDumpService.ThreadInfo> threads = allThreads.subList(safeFrom, safeTo);
+
                 StringBuilder sb = new StringBuilder();
-                sb.append(String.format("Found %d threads:\n\n", threads.size()));
+                sb.append(String.format("Threads %d-%d of %d total:\n\n", safeFrom, safeTo, allThreads.size()));
                 for (HeapDumpService.ThreadInfo thread : threads) {
-                    sb.append(String.format("Thread: \"%s\" (ID: %d)\n",
+                    int totalFrames = thread.stackTrace != null ? thread.stackTrace.length : 0;
+                    sb.append(String.format("Thread: \"%s\" (ID: %d, %d frames)\n",
                             thread.threadName != null ? thread.threadName : "<unnamed>",
-                            thread.instanceId));
+                            thread.instanceId, totalFrames));
                     if (thread.stackTrace != null && thread.stackTrace.length > 0) {
-                        for (StackTraceElement frame : thread.stackTrace) {
-                            sb.append("  at ").append(frame).append("\n");
+                        int framesToShow = Math.min(maxFrames, thread.stackTrace.length);
+                        for (int i = 0; i < framesToShow; i++) {
+                            sb.append("  at ").append(thread.stackTrace[i]).append("\n");
+                        }
+                        if (thread.stackTrace.length > framesToShow) {
+                            sb.append(String.format("  ... %d more frames\n", thread.stackTrace.length - framesToShow));
                         }
                     } else {
                         sb.append("  (no stack trace)\n");
