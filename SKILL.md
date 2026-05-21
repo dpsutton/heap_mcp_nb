@@ -56,8 +56,12 @@ Then use `/mcp` in Claude Code to enable it.
 - `get_dominator_tree` — Dominator tree rooted at an object, children sorted by retained size
 - `find_path` — BFS reference chain between two objects
 
+### Batch
+- `get_string_values_bulk` — Decode multiple Strings in one call
+
 ### Query
 - `execute_oql` — OQL queries (bootstrap classloader classes only; use `get_instances_by_class` for app classes)
+- `execute_clojure` — Evaluate Clojure expressions with full access to the heap (see below)
 
 ## Analysis Methodology
 
@@ -205,6 +209,81 @@ select (function() {
 - `classof(obj).name` — get class name
 - `sizeof(obj)` — shallow size
 - Array access: `heap.findObject(ARRAY_ID)[index]`
+
+## Clojure Eval — Scripted Heap Analysis
+
+The `execute_clojure` tool runs Clojure expressions in-process with full access to the loaded heap. Use it when you need to compose multiple operations in a single call instead of making sequential tool calls.
+
+**When to use it:** Once you know what you're looking for and need to extract data. The MCP tools are better for initial exploration and orientation.
+
+### Available functions
+
+**Core primitives** (thin wrappers over the MCP tools, return Clojure data):
+```clojure
+(instance id)              ; → {:id ... :class ... :size ... :retained ... :fields [...]}
+(string id)                ; → "the string text"
+(strings [id1 id2 id3])    ; → {id1 "text1", id2 "text2", id3 "text3"}
+(elements id from to)      ; → [{:id ... :class ...} ...] or resolved values
+(entries id from to)        ; → [{:key ... :val ...} ...] with auto-decoding
+(references id from to)    ; → [{:id ... :class ...} ...]
+(instances "class.Name" from to) ; → [{:id ... :size ... :retained ...} ...]
+(classes-matching "regex" from to)
+(biggest n)                ; → [{:id ... :class ... :retained ... :owner {...}} ...]
+(summary)                  ; → {:instances ... :bytes ... :time ...}
+(gc-root id)               ; → {:path [...] :root-kind ... :thread ... :stack [...]}
+(threads)                  ; → [{:id ... :name ... :frames n} ...]
+(retained-breakdown id n)  ; → [{:class ... :size ... :count ...} ...]
+(dominator-tree id depth max-children)
+(find-path from-id to-id)
+```
+
+**Convenience helpers:**
+```clojure
+(fields id)        ; All fields resolved one level: Strings→text, Keywords→:kw, boxed→value
+(describe id)      ; {:class ... :size ... :retained ... :fields (fields id)}
+(resolve-value id) ; Decode a single instance: String/Keyword/boxed primitive → value
+(keyword-name id)  ; Read a Clojure keyword's text
+```
+
+### Example patterns
+
+```clojure
+;; Top 5 biggest objects with all fields resolved (replaces ~15 tool calls)
+(->> (biggest 5)
+     (mapv #(assoc % :fields (fields (:id %)))))
+
+;; Decode all strings in an array
+(->> (elements some-array-id 0 100)
+     (filter #(= (:class %) "java.lang.String"))
+     (mapv #(string (:id %))))
+
+;; Find what's in a HashMap — keys and values auto-decoded
+(entries some-map-id 0 20)
+;; => [{:key "void" :val "V"} {:key "boolean" :val "Z"} ...]
+
+;; GC root chain with thread context
+(let [root (gc-root suspicious-id)]
+  {:thread (:thread root)
+   :stack (take 10 (:stack root))
+   :object (fields suspicious-id)})
+
+;; Find large ArrayLists and show their sizes
+(->> (instances "java.util.ArrayList" 0 50)
+     (sort-by :retained >)
+     (take 10)
+     (mapv #(let [f (fields (:id %))]
+              {:id (:id %) :size (:size f) :retained (:retained %)})))
+
+;; Custom: group instances by a field value
+(->> (instances "com.example.MyClass" 0 1000)
+     (group-by #(get (fields (:id %)) :type))
+     (map (fn [[k vs]] [k (count vs)]))
+     (into {}))
+```
+
+### Key principle
+
+The primitives return data, you write the composition. `(instance id)` is raw truth, `(fields id)` is the one-level-deep convenience. No magic — if you need deeper resolution, compose explicitly.
 
 ## GraalPy-Specific Notes
 
