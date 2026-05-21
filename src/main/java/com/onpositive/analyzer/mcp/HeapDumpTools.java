@@ -203,7 +203,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                int limit = ((Number) args.get("limit")).intValue();
+                int limit = parseIntArg(args.get("limit"), 10);
                 List<Instance> instances = heapDumpService.getBiggestObjectsByRetainedSize(limit);
                 StringBuilder sb = new StringBuilder();
                 int count = 0;
@@ -395,7 +395,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
+                long id = parseLongArg(args.get("id"));
                 JavaClass cls = heapDumpService.getJavaClassById(id);
                 if (cls == null) return errorResult("Class not found: " + id);
                 ClassDetails details = JavaClassPrinter.getClassDetails(cls);
@@ -436,7 +436,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
+                long id = parseLongArg(args.get("id"));
                 HeapDumpService.InstanceInfo instance = heapDumpService.getInstanceById(id);
                 if (instance == null) return errorResult("Instance not found: " + id);
                 
@@ -504,7 +504,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
+                long id = parseLongArg(args.get("id"));
                 Number fromObj = (Number) args.get("from");
                 Number toObj = (Number) args.get("to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
@@ -712,8 +712,8 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
-                int index = ((Number) args.get("index")).intValue();
+                long id = parseLongArg(args.get("id"));
+                int index = parseIntArg(args.get("index"), 0);
                 HeapDumpService.ArrayElementInfo elem = heapDumpService.getArrayElement(id, index);
                 String result = String.format("Index: %d, Class: %s, Instance ID: %d",
                         elem.index, elem.className, elem.instanceId);
@@ -751,7 +751,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
+                long id = parseLongArg(args.get("id"));
                 Number fromObj = (Number) args.get("from");
                 Number toObj = (Number) args.get("to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
@@ -798,7 +798,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
+                long id = parseLongArg(args.get("id"));
                 Number offsetObj = (Number) args.get("offset");
                 Number lengthObj = (Number) args.get("length");
                 int offset = (offsetObj != null) ? offsetObj.intValue() : 0;
@@ -835,7 +835,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
+                long id = parseLongArg(args.get("id"));
                 String value = heapDumpService.getStringValue(id);
                 return McpSchema.CallToolResult.builder()
                         .content(List.of(new McpSchema.TextContent(value)))
@@ -914,7 +914,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
+                long id = parseLongArg(args.get("id"));
                 Number maxFramesObj = (Number) args.get("max_frames");
                 int maxFrames = (maxFramesObj != null) ? maxFramesObj.intValue() : 50;
 
@@ -1043,7 +1043,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
+                long id = parseLongArg(args.get("id"));
                 Number fromObj = (Number) args.get("from");
                 Number toObj = (Number) args.get("to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
@@ -1090,7 +1090,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
+                long id = parseLongArg(args.get("id"));
                 Number topNObj = (Number) args.get("top_n");
                 int topN = (topNObj != null) ? topNObj.intValue() : 20;
 
@@ -1137,8 +1137,8 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long fromId = ((Number) args.get("from_id")).longValue();
-                long toId = ((Number) args.get("to_id")).longValue();
+                long fromId = parseLongArg(args.get("from_id"));
+                long toId = parseLongArg(args.get("to_id"));
                 Number maxDepthObj = (Number) args.get("max_depth");
                 int maxDepth = (maxDepthObj != null) ? maxDepthObj.intValue() : 50;
 
@@ -1188,7 +1188,7 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                long id = ((Number) args.get("id")).longValue();
+                long id = parseLongArg(args.get("id"));
                 Number depthObj = (Number) args.get("depth");
                 Number maxChildrenObj = (Number) args.get("max_children");
                 int depth = (depthObj != null) ? depthObj.intValue() : 3;
@@ -1214,6 +1214,19 @@ public class HeapDumpTools {
         for (HeapDumpService.DominatorNode child : node.children) {
             formatDominatorNode(sb, child, indent + 1);
         }
+    }
+
+    private static long parseLongArg(Object value) {
+        if (value instanceof Number) return ((Number) value).longValue();
+        if (value instanceof String) return Long.parseLong((String) value);
+        throw new IllegalArgumentException("Expected a number, got: " + value);
+    }
+
+    private static int parseIntArg(Object value, int defaultValue) {
+        if (value == null) return defaultValue;
+        if (value instanceof Number) return ((Number) value).intValue();
+        if (value instanceof String) return Integer.parseInt((String) value);
+        throw new IllegalArgumentException("Expected a number, got: " + value);
     }
 
     private String formatSummary(HeapSummary summary) {
