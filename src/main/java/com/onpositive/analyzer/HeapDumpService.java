@@ -259,11 +259,13 @@ public class HeapDumpService {
             fields.add(new FieldInfo(fieldName, valueStr, objectInstanceId, refClassName, inlineValue));
         }
 
+        long retained = 0;
+        try { retained = instance.getRetainedSize(); } catch (Exception e) { /* skip */ }
         return new InstanceInfo(
                 instance.getInstanceId(),
                 getClassName(instance),
                 instance.getSize(),
-                instance.getRetainedSize(),
+                retained,
                 fields
         );
     }
@@ -581,12 +583,28 @@ public class HeapDumpService {
 
         PrimitiveArrayInstance valueArray = (PrimitiveArrayInstance) valueField;
         List<String> values = valueArray.getValues();
+        String arrayClass = valueArray.getJavaClass().getName();
+
+        if (arrayClass.equals("char[]")) {
+            // Pre-Java-9: String.value is char[]
+            StringBuilder sb = new StringBuilder(values.size());
+            for (String v : values) {
+                if (v.length() == 1) {
+                    sb.append(v.charAt(0));
+                } else {
+                    // Numeric char value
+                    sb.append((char) Integer.parseInt(v));
+                }
+            }
+            return sb.toString();
+        }
+
+        // Java 9+: String.value is byte[]
         byte[] bytes = new byte[values.size()];
         for (int i = 0; i < values.size(); i++) {
             bytes[i] = Byte.parseByte(values.get(i));
         }
 
-        // Java 9+ compact strings: coder=0 is Latin-1, coder=1 is UTF-16
         Object coderObj = instance.getValueOfField("coder");
         if (coderObj instanceof Number) {
             int coder = ((Number) coderObj).intValue();
@@ -594,7 +612,6 @@ public class HeapDumpService {
                 return new String(bytes, StandardCharsets.UTF_16);
             }
         }
-        // coder=0 or pre-Java-9 (char[] stored as bytes): Latin-1
         return new String(bytes, StandardCharsets.ISO_8859_1);
     }
 
@@ -682,11 +699,13 @@ public class HeapDumpService {
 
         List<InstanceInfo> result = new ArrayList<>();
         for (Instance inst : instances.subList(safeFrom, safeTo)) {
+            long retained = 0;
+            try { retained = inst.getRetainedSize(); } catch (Exception e) { /* skip */ }
             result.add(new InstanceInfo(
                     inst.getInstanceId(),
                     getClassName(inst),
                     inst.getSize(),
-                    inst.getRetainedSize(),
+                    retained,
                     List.of() // skip fields for listing — use get_instance_by_id for details
             ));
         }

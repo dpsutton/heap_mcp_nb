@@ -26,7 +26,24 @@
     (try (.getStringValue *service* (.getInstanceId inst))
          (catch Exception _ nil))))
 
-(defn- resolve-value
+(defn- parse-primitive
+  "Parse a string representation of a primitive to its actual type.
+   Returns numbers, booleans, or the original string."
+  [^String s]
+  (when s
+    (case s
+      "true" true
+      "false" false
+      (if (and (pos? (.length s))
+               (let [c (.charAt s 0)]
+                 (or (Character/isDigit c) (= c \-))))
+        (try (Long/parseLong s)
+             (catch NumberFormatException _
+               (try (Double/parseDouble s)
+                    (catch NumberFormatException _ s))))
+        s))))
+
+(defn resolve-value
   "Resolve an Instance to its value if it's a well-known type.
    String → string, Keyword → :keyword, boxed primitive → value.
    Returns nil for unknown types."
@@ -56,37 +73,57 @@
 
         ("java.lang.Long" "java.lang.Integer" "java.lang.Short" "java.lang.Byte"
          "java.lang.Double" "java.lang.Float" "java.lang.Boolean" "java.lang.Character")
-        (.getValueOfField inst "value")
+        (let [v (.getValueOfField inst "value")]
+          (if (string? v) (parse-primitive v) v))
 
         nil))))
 
-(defn- field-values-raw
-  "Return raw field values as a vec of maps."
-  [^Instance inst]
-  (vec
-   (for [fv (.getFieldValues inst)
-         :let [fv (cast FieldValue fv)
-               fname (.getName (.getField fv))]]
-     (if (instance? ObjectFieldValue fv)
-       (let [ref (.getInstance ^ObjectFieldValue fv)]
-         (if ref
-           {:name fname :id (.getInstanceId ref) :class (class-name ref)
-            :ref ref}
-           {:name fname :value nil}))
-       {:name fname :value (.getValue fv)}))))
+(defn- resolve-field-value
+  "Resolve a FieldValue to a [keyword-name, value] pair.
+   Object references: resolved if well-known type, else {:id :class}.
+   Primitives: parsed to actual numeric/boolean values."
+  [^FieldValue fv]
+  (let [fname (keyword (.getName (.getField fv)))]
+    (if (instance? ObjectFieldValue fv)
+      (let [ref (.getInstance ^ObjectFieldValue fv)]
+        (if ref
+          (let [resolved (resolve-value ref)]
+            (if (some? resolved)
+              [fname resolved]
+              [fname {:id (.getInstanceId ref) :class (class-name ref)}]))
+          [fname nil]))
+      [fname (parse-primitive (.getValue fv))])))
 
 ;; === Core primitives ===
 
+(defn fields
+  "Get an instance's fields as a map with common types auto-resolved.
+   Strings→text, Keywords→:kw, boxed primitives→values, numeric primitives→numbers.
+   Other references stay as {:id ... :class ...}."
+  [id]
+  (let [inst (.getInstanceByID (get-heap) (long id))]
+    (when inst
+      (into {} (map resolve-field-value) (.getFieldValues inst)))))
+
+(defn- safe-retained [^Instance inst]
+  (try (.getRetainedSize inst) (catch Exception _ 0)))
+
 (defn instance
-  "Get instance details by ID. Returns a map with :id, :class, :size, :retained, :fields."
+  "Get instance details by ID.
+   Returns {:id :class :size :retained :fields {keyword-name → value}}."
   [id]
   (let [inst (.getInstanceByID (get-heap) (long id))]
     (when inst
       {:id (.getInstanceId inst)
        :class (class-name inst)
        :size (.getSize inst)
-       :retained (.getRetainedSize inst)
-       :fields (field-values-raw inst)})))
+       :retained (safe-retained inst)
+       :fields (fields id)})))
+
+(defn field
+  "Get a single field value from an instance. Shortcut for (get (fields id) :field-name)."
+  [id field-name]
+  (get (fields id) (if (keyword? field-name) field-name (keyword field-name))))
 
 (defn string
   "Decode a java.lang.String instance to text."
@@ -101,53 +138,18 @@
                            (catch Exception e (str "<error: " (.getMessage e) ">")))]))
         ids))
 
-(defn fields
-  "Get an instance's fields with common types auto-resolved.
-   Strings become strings, Keywords become keywords, boxed primitives unwrap.
-   Other references stay as {:id ... :class ...}."
-  [id]
-  (let [inst (.getInstanceByID (get-heap) (long id))]
-    (when inst
-      (into {}
-            (for [fv (.getFieldValues inst)
-                  :let [fv (cast FieldValue fv)
-                        fname (keyword (.getName (.getField fv)))]]
-              (if (instance? ObjectFieldValue fv)
-                (let [ref (.getInstance ^ObjectFieldValue fv)]
-                  (if ref
-                    (let [resolved (resolve-value ref)]
-                      (if (some? resolved)
-                        [fname resolved]
-                        [fname {:id (.getInstanceId ref) :class (class-name ref)}]))
-                    [fname nil]))
-                [fname (.getValue fv)]))))))
-
 (defn elements
-  "Get elements from an Object[] or ArrayList. Returns vec of resolved values or {:id :class} maps."
+  "Get elements from an Object[], ArrayList, or PersistentVector.
+   Returns vec of resolved values or {:id :class} maps."
   ([id] (elements id 0 50))
   ([id from to]
-   (let [inst (.getInstanceByID (get-heap) (long id))
-         arr (cond
-               (instance? ObjectArrayInstance inst) inst
-               (= (class-name inst) "java.util.ArrayList")
-               (let [ed (.getValueOfField inst "elementData")]
-                 (when (instance? ObjectArrayInstance ed) ed))
-               :else (throw (IllegalArgumentException.
-                             (str "Not an array or ArrayList: " (class-name inst)))))
-         values (.getValues ^ObjectArrayInstance arr)
-         len (.getLength ^ObjectArrayInstance arr)
-         safe-from (max 0 (min from len))
-         safe-to (max safe-from (min to len))]
-     (vec
-      (for [i (range safe-from safe-to)
-            :let [elem (.get values i)]]
-        (if (nil? elem)
-          nil
-          (let [resolved (resolve-value elem)]
-            (if (some? resolved)
-              resolved
-              {:id (.getInstanceId ^Instance elem)
-               :class (class-name elem)}))))))))
+   (let [raw (.getArrayElements *service* (long id) (int from) (int to))]
+     (vec (for [e raw]
+            (let [v (.value e)]
+              (cond
+                (and v (not= v "null")) v
+                (= (.className e) "null") nil
+                :else {:id (.instanceId e) :class (.className e)})))))))
 
 (defn entries
   "Get entries from a HashMap or Clojure map. Returns vec of {:key ... :val ...}."
@@ -191,15 +193,51 @@
      (vec (for [c classes]
             {:name (.getName c) :instances (.getInstancesCount c)})))))
 
+(defn- collection-count
+  "Try to read the count/size of a known collection type. Returns nil if unknown."
+  [^Instance inst]
+  (let [cn (class-name inst)]
+    (case cn
+      "java.util.ArrayList"
+      (let [v (.getValueOfField inst "size")]
+        (when v (if (number? v) (long v) (parse-primitive (str v)))))
+
+      ("java.util.HashMap" "java.util.LinkedHashMap")
+      (let [v (.getValueOfField inst "size")]
+        (when v (if (number? v) (long v) (parse-primitive (str v)))))
+
+      "clojure.lang.PersistentVector"
+      (let [v (.getValueOfField inst "cnt")]
+        (when v (if (number? v) (long v) (parse-primitive (str v)))))
+
+      "clojure.lang.PersistentHashMap"
+      (let [v (.getValueOfField inst "count")]
+        (when v (if (number? v) (long v) (parse-primitive (str v)))))
+
+      "clojure.lang.PersistentArrayMap"
+      (let [arr (.getValueOfField inst "array")]
+        (when (instance? ObjectArrayInstance arr)
+          (/ (.getLength ^ObjectArrayInstance arr) 2)))
+
+      nil nil
+
+      ;; default — check for raw arrays
+      (cond
+        (instance? ObjectArrayInstance inst) (.getLength ^ObjectArrayInstance inst)
+        :else nil))))
+
 (defn biggest
-  "Get biggest objects by retained size."
+  "Get biggest objects by retained size. Includes :count for known collection types."
   ([] (biggest 10))
   ([n]
    (let [objs (.getBiggestObjectsWithOwner *service* (int n))]
      (vec (for [o objs]
-            (cond-> {:id (.instanceId o) :class (.className o)
-                     :retained (.retainedSize o) :shallow (.shallowSize o)}
-              (.ownerClass o) (assoc :owner {:class (.ownerClass o) :id (.ownerId o)})))))))
+            (let [inst (.getInstanceByID (get-heap) (.instanceId o))
+                  cnt (when inst (collection-count inst))]
+              (cond-> {:id (.instanceId o) :class (.className o)
+                       :retained (.retainedSize o) :shallow (.shallowSize o)}
+                (.ownerClass o) (assoc :owner {:class (.ownerClass o) :id (.ownerId o)})
+                cnt (assoc :count cnt))))))))
 
 (defn summary
   "Get heap summary."
@@ -277,5 +315,10 @@
     (when inst
       {:class (class-name inst)
        :size (.getSize inst)
-       :retained (.getRetainedSize inst)
+       :retained (safe-retained inst)
        :fields (fields id)})))
+
+(defn describe-all
+  "Describe multiple instances. Returns a vec of describe results."
+  [ids]
+  (mapv describe ids))

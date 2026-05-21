@@ -220,15 +220,21 @@ The `execute_clojure` tool runs Clojure expressions in-process with full access 
 
 **Core primitives** (thin wrappers over the MCP tools, return Clojure data):
 ```clojure
-(instance id)              ; → {:id ... :class ... :size ... :retained ... :fields [...]}
+(instance id)              ; → {:id ... :class ... :size ... :retained ...
+                           ;    :fields {:name "value", :count 42, :data {:id ... :class ...}}}
+                           ;  Fields are a keyword-keyed map. Primitives are real values
+                           ;  (numbers, booleans), not strings. References are {:id :class} maps.
 (string id)                ; → "the string text"
 (strings [id1 id2 id3])    ; → {id1 "text1", id2 "text2", id3 "text3"}
-(elements id from to)      ; → [{:id ... :class ...} ...] or resolved values
-(entries id from to)        ; → [{:key ... :val ...} ...] with auto-decoding
+(elements id from to)      ; → [resolved-values or {:id :class} maps]
+                           ;  Works with Object[], ArrayList, PersistentVector,
+                           ;  PersistentVector$Node
+(entries id from to)       ; → [{:key ... :val ...} ...] with auto-decoding
 (references id from to)    ; → [{:id ... :class ...} ...]
 (instances "class.Name" from to) ; → [{:id ... :size ... :retained ...} ...]
 (classes-matching "regex" from to)
-(biggest n)                ; → [{:id ... :class ... :retained ... :owner {...}} ...]
+(biggest n)                ; → [{:id ... :class ... :retained ... :owner {...} :count 184799}]
+                           ;  :count included for ArrayList, HashMap, PersistentVector, etc.
 (summary)                  ; → {:instances ... :bytes ... :time ...}
 (gc-root id)               ; → {:path [...] :root-kind ... :thread ... :stack [...]}
 (threads)                  ; → [{:id ... :name ... :frames n} ...]
@@ -239,10 +245,14 @@ The `execute_clojure` tool runs Clojure expressions in-process with full access 
 
 **Convenience helpers:**
 ```clojure
-(fields id)        ; All fields resolved one level: Strings→text, Keywords→:kw, boxed→value
-(describe id)      ; {:class ... :size ... :retained ... :fields (fields id)}
-(resolve-value id) ; Decode a single instance: String/Keyword/boxed primitive → value
-(keyword-name id)  ; Read a Clojure keyword's text
+(fields id)          ; All fields as keyword map, common types auto-resolved:
+                     ;   Strings→text, Keywords→:kw, boxed primitives→numbers
+                     ;   Other references→{:id ... :class ...}
+(field id :name)     ; Get a single field value — shortcut for (get (fields id) :name)
+(describe id)        ; {:class ... :size ... :retained ... :fields (fields id)}
+(describe-all [ids]) ; Batch describe — vec of describe results
+(resolve-value inst) ; Decode a heap Instance: String/Keyword/boxed→value, else nil
+(keyword-name id)    ; Read a Clojure keyword's text
 ```
 
 ### Example patterns
@@ -252,14 +262,16 @@ The `execute_clojure` tool runs Clojure expressions in-process with full access 
 (->> (biggest 5)
      (mapv #(assoc % :fields (fields (:id %)))))
 
-;; Decode all strings in an array
-(->> (elements some-array-id 0 100)
-     (filter #(= (:class %) "java.lang.String"))
-     (mapv #(string (:id %))))
+;; Read a PersistentVector directly (flattens the trie)
+(elements pv-id 0 20)
+
+;; Quick field access — no more (first (filter #(= (:name %) "cnt") ...))
+(field some-id :cnt)    ; → 184799
+(field some-id :array)  ; → {:id 123 :class "Object[]"}
 
 ;; Find what's in a HashMap — keys and values auto-decoded
 (entries some-map-id 0 20)
-;; => [{:key "void" :val "V"} {:key "boolean" :val "Z"} ...]
+;; => [{:key "void" :val "V"} {:key :some/keyword :val 42} ...]
 
 ;; GC root chain with thread context
 (let [root (gc-root suspicious-id)]
@@ -267,23 +279,24 @@ The `execute_clojure` tool runs Clojure expressions in-process with full access 
    :stack (take 10 (:stack root))
    :object (fields suspicious-id)})
 
-;; Find large ArrayLists and show their sizes
-(->> (instances "java.util.ArrayList" 0 50)
-     (sort-by :retained >)
-     (take 10)
-     (mapv #(let [f (fields (:id %))]
-              {:id (:id %) :size (:size f) :retained (:retained %)})))
+;; Batch describe: resolve multiple instances at once
+(describe-all [id1 id2 id3])
 
 ;; Custom: group instances by a field value
 (->> (instances "com.example.MyClass" 0 1000)
-     (group-by #(get (fields (:id %)) :type))
+     (group-by #(field (:id %) :type))
      (map (fn [[k vs]] [k (count vs)]))
      (into {}))
+
+;; Define reusable helpers across calls
+(defn my-helper [id] (-> (fields id) :name))
+;; Then use in next call:
+(my-helper some-id)
 ```
 
 ### Key principle
 
-The primitives return data, you write the composition. `(instance id)` is raw truth, `(fields id)` is the one-level-deep convenience. No magic — if you need deeper resolution, compose explicitly.
+The primitives return data, you write the composition. `(instance id)` returns fields as a keyword-keyed map with primitives as real values. `(fields id)` and `(field id :name)` are the convenience layer. The stdlib is a data API, not an analysis framework.
 
 ## GraalPy-Specific Notes
 
