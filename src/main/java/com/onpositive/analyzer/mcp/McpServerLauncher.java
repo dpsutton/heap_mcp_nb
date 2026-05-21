@@ -55,7 +55,8 @@ public class McpServerLauncher {
                         heapDumpTools.getRetainedBreakdownTool(),
                         heapDumpTools.findPathTool(),
                         heapDumpTools.getDominatorTreeTool(),
-                        heapDumpTools.getStringValuesBulkTool()
+                        heapDumpTools.getStringValuesBulkTool(),
+                        heapDumpTools.executeClojureTool()
                 )
                 .build();
     }

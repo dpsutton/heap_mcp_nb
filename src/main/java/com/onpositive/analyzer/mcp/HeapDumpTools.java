@@ -1,5 +1,6 @@
 package com.onpositive.analyzer.mcp;
 
+import com.onpositive.analyzer.ClojureEvaluator;
 import com.onpositive.analyzer.HeapDumpService;
 import com.onpositive.analyzer.JavaClassPrinter;
 import com.onpositive.analyzer.JavaClassPrinter.ClassDetails;
@@ -29,10 +30,18 @@ import java.util.stream.Collectors;
 public class HeapDumpTools {
 
     private final HeapDumpService heapDumpService;
+    private ClojureEvaluator clojureEvaluator;
 
     // Constructor Injection ensures no magic instantiation
     public HeapDumpTools(HeapDumpService heapDumpService) {
         this.heapDumpService = heapDumpService;
+    }
+
+    private synchronized ClojureEvaluator getClojureEvaluator() {
+        if (clojureEvaluator == null) {
+            clojureEvaluator = new ClojureEvaluator(heapDumpService);
+        }
+        return clojureEvaluator;
     }
 
     public SyncToolSpecification loadHeapTool() {
@@ -1225,6 +1234,47 @@ public class HeapDumpTools {
         for (HeapDumpService.DominatorNode child : node.children) {
             formatDominatorNode(sb, child, indent + 1);
         }
+    }
+
+    public SyncToolSpecification executeClojureTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of("code", new McpSchema.JsonSchema("string", null, null, false, null, null)),
+                List.of("code"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "execute_clojure",
+                "Execute Clojure",
+                "Evaluate a Clojure expression with access to the loaded heap. " +
+                "Available functions: (instance id), (string id), (strings [ids]), (fields id), " +
+                "(elements id from to), (entries id from to), (references id from to), " +
+                "(instances \"class.Name\" from to), (classes-matching \"regex\" from to), " +
+                "(biggest n), (summary), (gc-root id), (threads), (retained-breakdown id n), " +
+                "(dominator-tree id depth max-children), (find-path from-id to-id), " +
+                "(keyword-name id), (describe id). " +
+                "Use resolve-value on any instance to decode Strings/Keywords/boxed primitives. " +
+                "Results are returned as pr-str'd Clojure data.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                String code = (String) args.get("code");
+                String result = getClojureEvaluator().eval(code);
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(result)))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                String msg = e.getMessage();
+                if (e.getCause() != null) msg += "\nCaused by: " + e.getCause().getMessage();
+                return errorResult(msg);
+            }
+        });
     }
 
     public SyncToolSpecification getStringValuesBulkTool() {
