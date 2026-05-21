@@ -98,7 +98,7 @@ public class LiveHeapTest {
                 var entries = svc.getMapEntries(hm.instanceId, 0, 5);
                 System.out.printf("  HashMap ID=%d (%d entries shown):%n", hm.instanceId, entries.size());
                 for (HeapDumpService.MapEntryInfo e : entries) {
-                    String keyDisplay = e.keyString != null ? "\"" + e.keyString + "\"" : e.keyClass;
+                    String keyDisplay = e.keyInline != null ? "\"" + e.keyInline + "\"" : e.keyClass;
                     System.out.printf("    %s -> %s (ID=%d)%n", keyDisplay, e.valueClass, e.valueId);
                 }
             } catch (Exception e) {

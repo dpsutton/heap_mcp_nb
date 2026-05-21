@@ -204,22 +204,17 @@ public class HeapDumpTools {
             Map<String, Object> args = request.arguments();
             try {
                 int limit = parseIntArg(args.get("limit"), 10);
-                List<Instance> instances = heapDumpService.getBiggestObjectsByRetainedSize(limit);
+                List<HeapDumpService.BigObjectInfo> objects = heapDumpService.getBiggestObjectsWithOwner(limit);
                 StringBuilder sb = new StringBuilder();
-                int count = 0;
-                for (Instance inst : instances) {
-                    try {
-                        long instanceId = inst.getInstanceId();
-                        String className = inst.getJavaClass().getName();
-                        long retainedSize = inst.getRetainedSize();
-                        sb.append(String.format("ID: %d, Class: %s, Retained Size: %d\n",
-                                instanceId, className, retainedSize));
-                        count++;
-                    } catch (Exception e) {
-                        // Skip objects with invalid instance references
+                for (HeapDumpService.BigObjectInfo obj : objects) {
+                    sb.append(String.format("ID: %d, Class: %s, Retained: %d, Shallow: %d",
+                            obj.instanceId, obj.className, obj.retainedSize, obj.shallowSize));
+                    if (obj.ownerClass != null) {
+                        sb.append(String.format(", Owner: %s (ID: %d)", obj.ownerClass, obj.ownerId));
                     }
+                    sb.append("\n");
                 }
-                if (count == 0) {
+                if (objects.isEmpty()) {
                     return errorResult("No valid instances found");
                 }
                 return McpSchema.CallToolResult.builder()
@@ -448,7 +443,13 @@ public class HeapDumpTools {
                 sb.append("Field Values:\n");
                 for (HeapDumpService.FieldInfo field : instance.fields) {
                     if (field.objectInstanceId != null) {
-                        sb.append(String.format("  %s: %s (Instance ID: %d)%n", field.name, field.value, field.objectInstanceId));
+                        if (field.inlineValue != null) {
+                            sb.append(String.format("  %s: %s [%s] (Instance ID: %d)%n",
+                                    field.name, field.inlineValue, field.refClassName, field.objectInstanceId));
+                        } else {
+                            sb.append(String.format("  %s: %s (Instance ID: %d)%n",
+                                    field.name, field.refClassName != null ? field.refClassName : field.value, field.objectInstanceId));
+                        }
                     } else {
                         sb.append(String.format("  %s: %s%n", field.name, field.value));
                     }
@@ -715,9 +716,14 @@ public class HeapDumpTools {
                 long id = parseLongArg(args.get("id"));
                 int index = parseIntArg(args.get("index"), 0);
                 HeapDumpService.ArrayElementInfo elem = heapDumpService.getArrayElement(id, index);
-                String result = String.format("Index: %d, Class: %s, Instance ID: %d",
-                        elem.index, elem.className, elem.instanceId);
-                if (elem.value != null) result += ", Value: " + elem.value;
+                String result;
+                if (elem.value != null && !elem.value.equals("null")) {
+                    result = String.format("Index: %d, Value: %s [%s] (Instance ID: %d)",
+                            elem.index, elem.value, elem.className, elem.instanceId);
+                } else {
+                    result = String.format("Index: %d, Class: %s, Instance ID: %d",
+                            elem.index, elem.className, elem.instanceId);
+                }
                 return McpSchema.CallToolResult.builder()
                         .content(List.of(new McpSchema.TextContent(result)))
                         .isError(false)
@@ -760,9 +766,11 @@ public class HeapDumpTools {
                 List<HeapDumpService.ArrayElementInfo> elements = heapDumpService.getArrayElements(id, from, to);
                 StringBuilder sb = new StringBuilder();
                 for (HeapDumpService.ArrayElementInfo elem : elements) {
-                    sb.append(String.format("[%d] Class: %s, Instance ID: %d", elem.index, elem.className, elem.instanceId));
-                    if (elem.value != null) sb.append(", Value: ").append(elem.value);
-                    sb.append("\n");
+                    if (elem.value != null && !elem.value.equals("null")) {
+                        sb.append(String.format("[%d] %s [%s] (ID: %d)\n", elem.index, elem.value, elem.className, elem.instanceId));
+                    } else {
+                        sb.append(String.format("[%d] %s (ID: %d)\n", elem.index, elem.className, elem.instanceId));
+                    }
                 }
                 return McpSchema.CallToolResult.builder()
                         .content(List.of(new McpSchema.TextContent(sb.toString())))
@@ -1053,10 +1061,13 @@ public class HeapDumpTools {
                 StringBuilder sb = new StringBuilder();
                 sb.append(String.format("Entries %d-%d:\n", from, from + entries.size()));
                 for (HeapDumpService.MapEntryInfo entry : entries) {
-                    String keyDisplay = entry.keyString != null
-                            ? "\"" + entry.keyString + "\""
+                    String keyDisplay = entry.keyInline != null
+                            ? entry.keyInline
                             : entry.keyClass + " (ID: " + entry.keyId + ")";
-                    sb.append(String.format("  %s → %s (ID: %d)\n", keyDisplay, entry.valueClass, entry.valueId));
+                    String valDisplay = entry.valueInline != null
+                            ? entry.valueInline + " [" + entry.valueClass + "] (ID: " + entry.valueId + ")"
+                            : entry.valueClass + " (ID: " + entry.valueId + ")";
+                    sb.append(String.format("  %s → %s\n", keyDisplay, valDisplay));
                 }
                 return McpSchema.CallToolResult.builder()
                         .content(List.of(new McpSchema.TextContent(sb.toString())))
@@ -1214,6 +1225,45 @@ public class HeapDumpTools {
         for (HeapDumpService.DominatorNode child : node.children) {
             formatDominatorNode(sb, child, indent + 1);
         }
+    }
+
+    public SyncToolSpecification getStringValuesBulkTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of("ids", new McpSchema.JsonSchema("array", null, null, false, null, null)),
+                List.of("ids"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_string_values_bulk",
+                "Get String Values Bulk",
+                "Decodes multiple java.lang.String instances in one call. Pass an array of instance IDs. Returns each ID with its decoded text.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                List<?> rawIds = (List<?>) args.get("ids");
+                List<Long> ids = new java.util.ArrayList<>();
+                for (Object rawId : rawIds) {
+                    ids.add(parseLongArg(rawId));
+                }
+                java.util.Map<Long, String> results = heapDumpService.getStringValuesBulk(ids);
+                StringBuilder sb = new StringBuilder();
+                for (java.util.Map.Entry<Long, String> entry : results.entrySet()) {
+                    sb.append(String.format("ID %d: %s\n", entry.getKey(), entry.getValue()));
+                }
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(sb.toString())))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
     }
 
     private static long parseLongArg(Object value) {

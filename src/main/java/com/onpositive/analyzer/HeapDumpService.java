@@ -125,6 +125,71 @@ public class HeapDumpService {
         return name;
     }
 
+    /**
+     * Tries to decode a well-known type inline: Strings, Keywords, boxed primitives.
+     * Returns null if the instance is not a decodable type.
+     */
+    private String resolveInlineValue(Instance instance) {
+        if (instance == null) return null;
+        String className = getClassName(instance);
+        try {
+            switch (className) {
+                case "java.lang.String":
+                    return "\"" + getStringValue(instance.getInstanceId()) + "\"";
+                case "java.lang.Long":
+                case "java.lang.Integer":
+                case "java.lang.Short":
+                case "java.lang.Byte":
+                case "java.lang.Double":
+                case "java.lang.Float":
+                case "java.lang.Boolean":
+                case "java.lang.Character": {
+                    Object val = instance.getValueOfField("value");
+                    return val != null ? val.toString() : null;
+                }
+                case "clojure.lang.Keyword": {
+                    Object sym = instance.getValueOfField("sym");
+                    if (sym instanceof Instance) {
+                        Instance symInst = (Instance) sym;
+                        String ns = resolveStringField(symInst, "ns");
+                        String name = resolveStringField(symInst, "name");
+                        if (name != null) {
+                            return ns != null ? ":" + ns + "/" + name : ":" + name;
+                        }
+                    }
+                    return null;
+                }
+                case "clojure.lang.Symbol": {
+                    String ns = resolveStringField(instance, "ns");
+                    String name = resolveStringField(instance, "name");
+                    if (name != null) {
+                        return ns != null ? ns + "/" + name : name;
+                    }
+                    return null;
+                }
+                default:
+                    return null;
+            }
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String resolveStringField(Instance instance, String fieldName) {
+        Object fieldVal = instance.getValueOfField(fieldName);
+        if (fieldVal instanceof Instance) {
+            Instance strInst = (Instance) fieldVal;
+            if (getClassName(strInst).equals("java.lang.String")) {
+                try {
+                    return getStringValue(strInst.getInstanceId());
+                } catch (Exception e) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
     public JavaClass getJavaClassByName(String name) {
         if (heap == null) throw new IllegalStateException("Heap not loaded");
         return heap.getJavaClassByName(name);
@@ -155,11 +220,15 @@ public class HeapDumpService {
         public String name;
         public String value;
         public Long objectInstanceId;
+        public String refClassName;
+        public String inlineValue; // decoded String/Keyword/boxed primitive
 
-        public FieldInfo(String name, String value, Long objectInstanceId) {
+        public FieldInfo(String name, String value, Long objectInstanceId, String refClassName, String inlineValue) {
             this.name = name;
             this.value = value;
             this.objectInstanceId = objectInstanceId;
+            this.refClassName = refClassName;
+            this.inlineValue = inlineValue;
         }
     }
 
@@ -167,25 +236,29 @@ public class HeapDumpService {
         if (heap == null) throw new IllegalStateException("Heap not loaded");
         Instance instance = heap.getInstanceByID(id);
         if (instance == null) return null;
-        
+
         List<FieldInfo> fields = new ArrayList<>();
         for (Object fvObj : instance.getFieldValues()) {
             FieldValue fv = (FieldValue) fvObj;
             String fieldName = fv.getField().getName();
             String valueStr = String.valueOf(fv.getValue());
             Long objectInstanceId = null;
-            
+            String refClassName = null;
+            String inlineValue = null;
+
             if (fv instanceof ObjectFieldValue) {
                 ObjectFieldValue ofv = (ObjectFieldValue) fv;
                 Instance refInstance = ofv.getInstance();
                 if (refInstance != null) {
                     objectInstanceId = refInstance.getInstanceId();
+                    refClassName = getClassName(refInstance);
+                    inlineValue = resolveInlineValue(refInstance);
                 }
             }
-            
-            fields.add(new FieldInfo(fieldName, valueStr, objectInstanceId));
+
+            fields.add(new FieldInfo(fieldName, valueStr, objectInstanceId, refClassName, inlineValue));
         }
-        
+
         return new InstanceInfo(
                 instance.getInstanceId(),
                 getClassName(instance),
@@ -327,7 +400,7 @@ public class HeapDumpService {
         public int index;
         public String className;
         public long instanceId;
-        public String value;
+        public String value; // inline-decoded value for Strings, Keywords, boxed primitives
 
         public ArrayElementInfo(int index, String className, long instanceId, String value) {
             this.index = index;
@@ -335,6 +408,13 @@ public class HeapDumpService {
             this.instanceId = instanceId;
             this.value = value;
         }
+    }
+
+    private ArrayElementInfo makeArrayElementInfo(int index, Instance element) {
+        if (element == null) {
+            return new ArrayElementInfo(index, "null", 0, "null");
+        }
+        return new ArrayElementInfo(index, getClassName(element), element.getInstanceId(), resolveInlineValue(element));
     }
 
     public ArrayElementInfo getArrayElement(long id, int index) {
@@ -347,15 +427,9 @@ public class HeapDumpService {
             if (index < 0 || index >= arr.getLength()) {
                 throw new IndexOutOfBoundsException("Index " + index + " out of bounds for array of length " + arr.getLength());
             }
-            List<Instance> values = arr.getValues();
-            Instance element = values.get(index);
-            if (element == null) {
-                return new ArrayElementInfo(index, "null", 0, "null");
-            }
-            return new ArrayElementInfo(index, getClassName(element), element.getInstanceId(), null);
+            return makeArrayElementInfo(index, ((List<Instance>) arr.getValues()).get(index));
         }
 
-        // ArrayList: read elementData array, then index into it
         String className = getClassName(instance);
         if (className.equals("java.util.ArrayList")) {
             Object elementData = instance.getValueOfField("elementData");
@@ -366,12 +440,7 @@ public class HeapDumpService {
                 if (index < 0 || index >= size) {
                     throw new IndexOutOfBoundsException("Index " + index + " out of bounds for ArrayList of size " + size);
                 }
-                List<Instance> values = arr.getValues();
-                Instance element = values.get(index);
-                if (element == null) {
-                    return new ArrayElementInfo(index, "null", 0, "null");
-                }
-                return new ArrayElementInfo(index, getClassName(element), element.getInstanceId(), null);
+                return makeArrayElementInfo(index, ((List<Instance>) arr.getValues()).get(index));
             }
         }
 
@@ -407,12 +476,7 @@ public class HeapDumpService {
         int safeTo = Math.max(safeFrom, Math.min(to, length));
         List<ArrayElementInfo> result = new ArrayList<>();
         for (int i = safeFrom; i < safeTo; i++) {
-            Instance element = values.get(i);
-            if (element == null) {
-                result.add(new ArrayElementInfo(i, "null", 0, "null"));
-            } else {
-                result.add(new ArrayElementInfo(i, getClassName(element), element.getInstanceId(), null));
-            }
+            result.add(makeArrayElementInfo(i, values.get(i)));
         }
         return result;
     }
@@ -486,6 +550,77 @@ public class HeapDumpService {
         }
         // coder=0 or pre-Java-9 (char[] stored as bytes): Latin-1
         return new String(bytes, StandardCharsets.ISO_8859_1);
+    }
+
+    // === Batch string decoding ===
+
+    public Map<Long, String> getStringValuesBulk(List<Long> ids) {
+        if (heap == null) throw new IllegalStateException("Heap not loaded");
+        Map<Long, String> results = new LinkedHashMap<>();
+        for (Long id : ids) {
+            try {
+                results.put(id, getStringValue(id));
+            } catch (Exception e) {
+                results.put(id, "<error: " + e.getMessage() + ">");
+            }
+        }
+        return results;
+    }
+
+    // === Biggest objects with owner info ===
+
+    public static class BigObjectInfo {
+        public long instanceId;
+        public String className;
+        public long retainedSize;
+        public long shallowSize;
+        public String ownerClass; // class of the first object that references this one
+        public long ownerId;
+
+        public BigObjectInfo(long instanceId, String className, long retainedSize, long shallowSize, String ownerClass, long ownerId) {
+            this.instanceId = instanceId;
+            this.className = className;
+            this.retainedSize = retainedSize;
+            this.shallowSize = shallowSize;
+            this.ownerClass = ownerClass;
+            this.ownerId = ownerId;
+        }
+    }
+
+    public List<BigObjectInfo> getBiggestObjectsWithOwner(int limit) {
+        if (heap == null) throw new IllegalStateException("Heap not loaded");
+        List<Instance> biggest = heap.getBiggestObjectsByRetainedSize(limit);
+        List<BigObjectInfo> result = new ArrayList<>();
+        for (Instance inst : biggest) {
+            try {
+                String ownerClass = null;
+                long ownerId = 0;
+                // Find first referrer
+                List<?> refs = inst.getReferences();
+                if (refs != null && !refs.isEmpty()) {
+                    for (Object refObj : refs) {
+                        Instance owner = null;
+                        if (refObj instanceof Value) {
+                            owner = ((Value) refObj).getDefiningInstance();
+                        }
+                        if (owner != null) {
+                            ownerClass = getClassName(owner);
+                            ownerId = owner.getInstanceId();
+                            break;
+                        }
+                    }
+                }
+                result.add(new BigObjectInfo(
+                        inst.getInstanceId(),
+                        getClassName(inst),
+                        inst.getRetainedSize(),
+                        inst.getSize(),
+                        ownerClass, ownerId));
+            } catch (Exception e) {
+                // skip
+            }
+        }
+        return result;
     }
 
     // === Task #9: Get instances by class ===
@@ -648,16 +783,18 @@ public class HeapDumpService {
     public static class MapEntryInfo {
         public long keyId;
         public String keyClass;
-        public String keyString; // decoded if key is a String
+        public String keyInline; // decoded if key is a String/Keyword/boxed primitive
         public long valueId;
         public String valueClass;
+        public String valueInline; // decoded if value is a String/Keyword/boxed primitive
 
-        public MapEntryInfo(long keyId, String keyClass, String keyString, long valueId, String valueClass) {
+        public MapEntryInfo(long keyId, String keyClass, String keyInline, long valueId, String valueClass, String valueInline) {
             this.keyId = keyId;
             this.keyClass = keyClass;
-            this.keyString = keyString;
+            this.keyInline = keyInline;
             this.valueId = valueId;
             this.valueClass = valueClass;
+            this.valueInline = valueInline;
         }
     }
 
@@ -684,6 +821,17 @@ public class HeapDumpService {
         return allEntries.subList(safeFrom, safeTo);
     }
 
+    private MapEntryInfo makeMapEntry(Instance key, Instance val) {
+        return new MapEntryInfo(
+                key != null ? key.getInstanceId() : 0,
+                key != null ? getClassName(key) : "null",
+                resolveInlineValue(key),
+                val != null ? val.getInstanceId() : 0,
+                val != null ? getClassName(val) : "null",
+                resolveInlineValue(val)
+        );
+    }
+
     private void collectHashMapEntries(Instance mapInstance, List<MapEntryInfo> entries) {
         Object tableObj = mapInstance.getValueOfField("table");
         if (!(tableObj instanceof ObjectArrayInstance)) return;
@@ -692,16 +840,11 @@ public class HeapDumpService {
         for (Instance bucket : (List<Instance>) table.getValues()) {
             Instance node = bucket;
             while (node != null) {
-                Instance key = (Instance) node.getValueOfField("key");
-                Instance val = (Instance) node.getValueOfField("value");
-                String keyStr = tryDecodeString(key);
-                entries.add(new MapEntryInfo(
-                        key != null ? key.getInstanceId() : 0,
-                        key != null ? getClassName(key) : "null",
-                        keyStr,
-                        val != null ? val.getInstanceId() : 0,
-                        val != null ? getClassName(val) : "null"
-                ));
+                Object keyObj = node.getValueOfField("key");
+                Object valObj = node.getValueOfField("value");
+                Instance key = (keyObj instanceof Instance) ? (Instance) keyObj : null;
+                Instance val = (valObj instanceof Instance) ? (Instance) valObj : null;
+                entries.add(makeMapEntry(key, val));
                 Object nextObj = node.getValueOfField("next");
                 node = (nextObj instanceof Instance) ? (Instance) nextObj : null;
             }
@@ -713,19 +856,11 @@ public class HeapDumpService {
         if (!(arrayObj instanceof ObjectArrayInstance)) return;
         ObjectArrayInstance array = (ObjectArrayInstance) arrayObj;
         List<Instance> values = array.getValues();
-        // PersistentArrayMap stores [key0, val0, key1, val1, ...]
         for (int i = 0; i + 1 < values.size(); i += 2) {
             Instance key = values.get(i);
             Instance val = values.get(i + 1);
             if (key == null && val == null) continue;
-            String keyStr = tryDecodeString(key);
-            entries.add(new MapEntryInfo(
-                    key != null ? key.getInstanceId() : 0,
-                    key != null ? getClassName(key) : "null",
-                    keyStr,
-                    val != null ? val.getInstanceId() : 0,
-                    val != null ? getClassName(val) : "null"
-            ));
+            entries.add(makeMapEntry(key, val));
         }
     }
 
@@ -734,14 +869,11 @@ public class HeapDumpService {
         if (rootNode instanceof Instance) {
             walkINode((Instance) rootNode, entries);
         }
-        // Also check for a null-key entry
         Object hasNull = phmInstance.getValueOfField("hasNull");
         if (hasNull instanceof Boolean && (Boolean) hasNull) {
             Object nullValue = phmInstance.getValueOfField("nullValue");
             Instance val = (nullValue instanceof Instance) ? (Instance) nullValue : null;
-            entries.add(new MapEntryInfo(0, "null", null,
-                    val != null ? val.getInstanceId() : 0,
-                    val != null ? getClassName(val) : "null"));
+            entries.add(makeMapEntry(null, val));
         }
     }
 
@@ -753,19 +885,12 @@ public class HeapDumpService {
             Object arrayObj = node.getValueOfField("array");
             if (arrayObj instanceof ObjectArrayInstance) {
                 List<Instance> arr = ((ObjectArrayInstance) arrayObj).getValues();
-                // array is [key0, valOrNode0, key1, valOrNode1, ...]
                 for (int i = 0; i + 1 < arr.size(); i += 2) {
                     Instance key = arr.get(i);
                     Instance valOrNode = arr.get(i + 1);
                     if (key != null) {
-                        // It's a key-value pair
-                        String keyStr = tryDecodeString(key);
-                        entries.add(new MapEntryInfo(
-                                key.getInstanceId(), getClassName(key), keyStr,
-                                valOrNode != null ? valOrNode.getInstanceId() : 0,
-                                valOrNode != null ? getClassName(valOrNode) : "null"));
+                        entries.add(makeMapEntry(key, valOrNode));
                     } else if (valOrNode != null) {
-                        // It's a sub-node
                         walkINode(valOrNode, entries);
                     }
                 }
@@ -783,30 +908,10 @@ public class HeapDumpService {
             if (arrayObj instanceof ObjectArrayInstance) {
                 List<Instance> arr = ((ObjectArrayInstance) arrayObj).getValues();
                 for (int i = 0; i + 1 < arr.size(); i += 2) {
-                    Instance key = arr.get(i);
-                    Instance val = arr.get(i + 1);
-                    if (key != null) {
-                        String keyStr = tryDecodeString(key);
-                        entries.add(new MapEntryInfo(
-                                key.getInstanceId(), getClassName(key), keyStr,
-                                val != null ? val.getInstanceId() : 0,
-                                val != null ? getClassName(val) : "null"));
-                    }
+                    entries.add(makeMapEntry(arr.get(i), arr.get(i + 1)));
                 }
             }
         }
-    }
-
-    private String tryDecodeString(Instance instance) {
-        if (instance == null) return null;
-        try {
-            if (getClassName(instance).equals("java.lang.String")) {
-                return getStringValue(instance.getInstanceId());
-            }
-        } catch (Exception e) {
-            // Not a string or can't decode
-        }
-        return null;
     }
 
     // === Task #10: Retained size breakdown ===
