@@ -28,6 +28,7 @@ public class McpServerLauncher {
                         .logging()
                         .build())
                 .tools(
+                        // Existing tools
                         heapDumpTools.loadHeapTool(),
                         heapDumpTools.getClassesByMaxInstancesCountTool(),
                         heapDumpTools.getClassesByMaxInstancesSizeTool(),
@@ -41,7 +42,19 @@ public class McpServerLauncher {
                         heapDumpTools.getJavaClassByIdTool(),
                         heapDumpTools.getSummaryTool(),
                         heapDumpTools.getSystemPropertiesTool(),
-                        heapDumpTools.executeOqlTool()
+                        heapDumpTools.executeOqlTool(),
+                        // New tools
+                        heapDumpTools.getArrayElementTool(),
+                        heapDumpTools.getArrayElementsTool(),
+                        heapDumpTools.getByteArrayContentsTool(),
+                        heapDumpTools.getStringValueTool(),
+                        heapDumpTools.getInstancesByClassTool(),
+                        heapDumpTools.getGCRootForTool(),
+                        heapDumpTools.getThreadsTool(),
+                        heapDumpTools.getMapEntriesTool(),
+                        heapDumpTools.getRetainedBreakdownTool(),
+                        heapDumpTools.findPathTool(),
+                        heapDumpTools.getDominatorTreeTool()
                 )
                 .build();
     }

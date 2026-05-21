@@ -11,6 +11,9 @@ import org.netbeans.lib.profiler.heap.GCRoot;
 import org.netbeans.lib.profiler.heap.Instance;
 import org.netbeans.lib.profiler.heap.JavaClass;
 
+import org.netbeans.lib.profiler.heap.ObjectArrayInstance;
+import org.netbeans.lib.profiler.heap.PrimitiveArrayInstance;
+
 import java.io.IOException;
 import java.util.Collection;
 import java.util.HashMap;
@@ -657,7 +660,10 @@ public class HeapDumpTools {
         McpSchema.Tool tool = new McpSchema.Tool(
                 "execute_oql",
                 "Execute OQL Query",
-                "Executes an OQL query on the heap dump. Query syntax example: 'select s.value from java.lang.String s'",
+                "Executes an OQL query on the heap dump. Query syntax example: 'select s.value from java.lang.String s'. " +
+                "Instance IDs returned are decimal and compatible with get_instance_by_id and other tools. " +
+                "In OQL, use heap.findObject(decimalId) to look up objects by the same ID. " +
+                "Note: OQL can only query classes loaded by the bootstrap classloader; for app classes, use get_instances_by_class instead.",
                 inputSchema,
                 null, null, null
         );
@@ -680,6 +686,495 @@ public class HeapDumpTools {
                 return errorResult(message + e.getMessage());
             }
         });
+    }
+
+    // === New tools ===
+
+    public SyncToolSpecification getArrayElementTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of(
+                        "id", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "index", new McpSchema.JsonSchema("integer", null, null, false, null, null)
+                ),
+                List.of("id", "index"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_array_element",
+                "Get Array Element",
+                "Returns the element at a given index from an Object[] or ArrayList. Returns the element's class and instance ID.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                long id = ((Number) args.get("id")).longValue();
+                int index = ((Number) args.get("index")).intValue();
+                HeapDumpService.ArrayElementInfo elem = heapDumpService.getArrayElement(id, index);
+                String result = String.format("Index: %d, Class: %s, Instance ID: %d",
+                        elem.index, elem.className, elem.instanceId);
+                if (elem.value != null) result += ", Value: " + elem.value;
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(result)))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    public SyncToolSpecification getArrayElementsTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of(
+                        "id", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "from", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "to", new McpSchema.JsonSchema("integer", null, null, false, null, null)
+                ),
+                List.of("id"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_array_elements",
+                "Get Array Elements",
+                "Returns a range of elements from an Object[] or ArrayList with pagination. Each element includes its class and instance ID.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                long id = ((Number) args.get("id")).longValue();
+                Number fromObj = (Number) args.get("from");
+                Number toObj = (Number) args.get("to");
+                int from = (fromObj != null) ? fromObj.intValue() : 0;
+                int to = (toObj != null) ? toObj.intValue() : 50;
+
+                List<HeapDumpService.ArrayElementInfo> elements = heapDumpService.getArrayElements(id, from, to);
+                StringBuilder sb = new StringBuilder();
+                for (HeapDumpService.ArrayElementInfo elem : elements) {
+                    sb.append(String.format("[%d] Class: %s, Instance ID: %d", elem.index, elem.className, elem.instanceId));
+                    if (elem.value != null) sb.append(", Value: ").append(elem.value);
+                    sb.append("\n");
+                }
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(sb.toString())))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    public SyncToolSpecification getByteArrayContentsTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of(
+                        "id", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "offset", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "length", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "encoding", new McpSchema.JsonSchema("string", null, null, false, null, null)
+                ),
+                List.of("id"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_byte_array_contents",
+                "Get Byte Array Contents",
+                "Returns the contents of a byte[] as text. Encoding options: 'latin1' (default), 'utf16', 'hex'. Use offset and length to read a portion.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                long id = ((Number) args.get("id")).longValue();
+                Number offsetObj = (Number) args.get("offset");
+                Number lengthObj = (Number) args.get("length");
+                int offset = (offsetObj != null) ? offsetObj.intValue() : 0;
+                int length = (lengthObj != null) ? lengthObj.intValue() : Integer.MAX_VALUE;
+                String encoding = (String) args.getOrDefault("encoding", "latin1");
+
+                String result = heapDumpService.getByteArrayContents(id, offset, length, encoding);
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(result)))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    public SyncToolSpecification getStringValueTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of("id", new McpSchema.JsonSchema("integer", null, null, false, null, null)),
+                List.of("id"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_string_value",
+                "Get String Value",
+                "Decodes a java.lang.String instance and returns its text content. Handles both Latin-1 (coder=0) and UTF-16 (coder=1) compact strings.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                long id = ((Number) args.get("id")).longValue();
+                String value = heapDumpService.getStringValue(id);
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(value)))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    public SyncToolSpecification getInstancesByClassTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of(
+                        "class_name", new McpSchema.JsonSchema("string", null, null, false, null, null),
+                        "from", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "to", new McpSchema.JsonSchema("integer", null, null, false, null, null)
+                ),
+                List.of("class_name"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_instances_by_class",
+                "Get Instances By Class",
+                "Returns instances of a given class with pagination. Each instance includes ID, class, size, and retained size.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                String className = (String) args.get("class_name");
+                Number fromObj = (Number) args.get("from");
+                Number toObj = (Number) args.get("to");
+                int from = (fromObj != null) ? fromObj.intValue() : 0;
+                int to = (toObj != null) ? toObj.intValue() : 50;
+
+                List<HeapDumpService.InstanceInfo> instances = heapDumpService.getInstancesByClass(className, from, to);
+                StringBuilder sb = new StringBuilder();
+                for (HeapDumpService.InstanceInfo inst : instances) {
+                    sb.append(String.format("ID: %d, Class: %s, Size: %d, Retained: %d\n",
+                            inst.instanceId, inst.className, inst.size, inst.retainedSize));
+                }
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(sb.toString())))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    public SyncToolSpecification getGCRootForTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of("id", new McpSchema.JsonSchema("integer", null, null, false, null, null)),
+                List.of("id"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_gc_root_for",
+                "Get GC Root For Object",
+                "Given an object ID, traces the path to its nearest GC root. Shows which root kind holds it alive, the thread name, frame number, and stack trace.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                long id = ((Number) args.get("id")).longValue();
+                HeapDumpService.GCRootPathInfo info = heapDumpService.getGCRootFor(id);
+                StringBuilder sb = new StringBuilder();
+                sb.append("Path to GC root:\n");
+                for (int i = 0; i < info.path.size(); i++) {
+                    HeapDumpService.PathElement pe = info.path.get(i);
+                    sb.append(String.format("  %s→ [%d] %s\n", "  ".repeat(i), pe.instanceId, pe.className));
+                }
+                if (info.rootKind != null) {
+                    sb.append("\nGC Root Kind: ").append(info.rootKind).append("\n");
+                }
+                if (info.threadName != null) {
+                    sb.append("Thread: ").append(info.threadName).append("\n");
+                }
+                if (info.frameNumber >= 0) {
+                    sb.append("Frame Number: ").append(info.frameNumber).append("\n");
+                }
+                if (info.stackTrace != null && info.stackTrace.length > 0) {
+                    sb.append("Stack Trace:\n");
+                    for (StackTraceElement frame : info.stackTrace) {
+                        sb.append("  at ").append(frame).append("\n");
+                    }
+                }
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(sb.toString())))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    public SyncToolSpecification getThreadsTool() {
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_threads",
+                "Get Threads",
+                "Returns all threads from the heap dump with their names and stack traces.",
+                new McpSchema.JsonSchema("object", Map.of(), List.of(), false, null, null),
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            try {
+                List<HeapDumpService.ThreadInfo> threads = heapDumpService.getThreads();
+                StringBuilder sb = new StringBuilder();
+                sb.append(String.format("Found %d threads:\n\n", threads.size()));
+                for (HeapDumpService.ThreadInfo thread : threads) {
+                    sb.append(String.format("Thread: \"%s\" (ID: %d)\n",
+                            thread.threadName != null ? thread.threadName : "<unnamed>",
+                            thread.instanceId));
+                    if (thread.stackTrace != null && thread.stackTrace.length > 0) {
+                        for (StackTraceElement frame : thread.stackTrace) {
+                            sb.append("  at ").append(frame).append("\n");
+                        }
+                    } else {
+                        sb.append("  (no stack trace)\n");
+                    }
+                    sb.append("\n");
+                }
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(sb.toString())))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    public SyncToolSpecification getMapEntriesTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of(
+                        "id", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "from", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "to", new McpSchema.JsonSchema("integer", null, null, false, null, null)
+                ),
+                List.of("id"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_map_entries",
+                "Get Map Entries",
+                "Returns key-value pairs from a HashMap, LinkedHashMap, PersistentArrayMap, or PersistentHashMap. Keys that are Strings are auto-decoded. Supports pagination.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                long id = ((Number) args.get("id")).longValue();
+                Number fromObj = (Number) args.get("from");
+                Number toObj = (Number) args.get("to");
+                int from = (fromObj != null) ? fromObj.intValue() : 0;
+                int to = (toObj != null) ? toObj.intValue() : 50;
+
+                List<HeapDumpService.MapEntryInfo> entries = heapDumpService.getMapEntries(id, from, to);
+                StringBuilder sb = new StringBuilder();
+                sb.append(String.format("Entries %d-%d:\n", from, from + entries.size()));
+                for (HeapDumpService.MapEntryInfo entry : entries) {
+                    String keyDisplay = entry.keyString != null
+                            ? "\"" + entry.keyString + "\""
+                            : entry.keyClass + " (ID: " + entry.keyId + ")";
+                    sb.append(String.format("  %s → %s (ID: %d)\n", keyDisplay, entry.valueClass, entry.valueId));
+                }
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(sb.toString())))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    public SyncToolSpecification getRetainedBreakdownTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of(
+                        "id", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "top_n", new McpSchema.JsonSchema("integer", null, null, false, null, null)
+                ),
+                List.of("id"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_retained_breakdown",
+                "Get Retained Size Breakdown",
+                "For a given object, walks its object graph and shows the top classes by size within the reachable set. Useful for understanding what a large object retains.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                long id = ((Number) args.get("id")).longValue();
+                Number topNObj = (Number) args.get("top_n");
+                int topN = (topNObj != null) ? topNObj.intValue() : 20;
+
+                List<HeapDumpService.RetainedBreakdownEntry> entries = heapDumpService.getRetainedBreakdown(id, topN);
+                StringBuilder sb = new StringBuilder();
+                long totalSize = entries.stream().mapToLong(e -> e.totalSize).sum();
+                sb.append(String.format("Retained breakdown (top %d classes, %d bytes total scanned):\n\n", topN, totalSize));
+                sb.append(String.format("%-50s | %12s | %8s\n", "Class", "Size", "Count"));
+                sb.append("-".repeat(75)).append("\n");
+                for (HeapDumpService.RetainedBreakdownEntry entry : entries) {
+                    sb.append(String.format("%-50s | %12d | %8d\n",
+                            truncate(entry.className, 50), entry.totalSize, entry.instanceCount));
+                }
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(sb.toString())))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    public SyncToolSpecification findPathTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of(
+                        "from_id", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "to_id", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "max_depth", new McpSchema.JsonSchema("integer", null, null, false, null, null)
+                ),
+                List.of("from_id", "to_id"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "find_path",
+                "Find Path Between Objects",
+                "Finds the reference chain between two objects using BFS. Returns the path of objects from source to destination.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                long fromId = ((Number) args.get("from_id")).longValue();
+                long toId = ((Number) args.get("to_id")).longValue();
+                Number maxDepthObj = (Number) args.get("max_depth");
+                int maxDepth = (maxDepthObj != null) ? maxDepthObj.intValue() : 50;
+
+                List<HeapDumpService.PathElement> path = heapDumpService.findPath(fromId, toId, maxDepth);
+                if (path.isEmpty()) {
+                    return McpSchema.CallToolResult.builder()
+                            .content(List.of(new McpSchema.TextContent("No path found between " + fromId + " and " + toId)))
+                            .isError(false)
+                            .build();
+                }
+                StringBuilder sb = new StringBuilder();
+                sb.append(String.format("Path (%d steps):\n", path.size() - 1));
+                for (int i = 0; i < path.size(); i++) {
+                    HeapDumpService.PathElement pe = path.get(i);
+                    sb.append(String.format("  %s[%d] %s\n", i > 0 ? "→ " : "  ", pe.instanceId, pe.className));
+                }
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(sb.toString())))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    public SyncToolSpecification getDominatorTreeTool() {
+        McpSchema.JsonSchema inputSchema = new McpSchema.JsonSchema(
+                "object",
+                Map.of(
+                        "id", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "depth", new McpSchema.JsonSchema("integer", null, null, false, null, null),
+                        "max_children", new McpSchema.JsonSchema("integer", null, null, false, null, null)
+                ),
+                List.of("id"),
+                false, null, null
+        );
+
+        McpSchema.Tool tool = new McpSchema.Tool(
+                "get_dominator_tree",
+                "Get Dominator Tree",
+                "Shows the dominator tree rooted at an object, with children sorted by retained size. Like Eclipse MAT's dominator view.",
+                inputSchema,
+                null, null, null
+        );
+
+        return new SyncToolSpecification(tool, (exchange, request) -> {
+            Map<String, Object> args = request.arguments();
+            try {
+                long id = ((Number) args.get("id")).longValue();
+                Number depthObj = (Number) args.get("depth");
+                Number maxChildrenObj = (Number) args.get("max_children");
+                int depth = (depthObj != null) ? depthObj.intValue() : 3;
+                int maxChildren = (maxChildrenObj != null) ? maxChildrenObj.intValue() : 10;
+
+                HeapDumpService.DominatorNode root = heapDumpService.getDominatorTree(id, depth, maxChildren);
+                StringBuilder sb = new StringBuilder();
+                formatDominatorNode(sb, root, 0);
+                return McpSchema.CallToolResult.builder()
+                        .content(List.of(new McpSchema.TextContent(sb.toString())))
+                        .isError(false)
+                        .build();
+            } catch (Exception e) {
+                return errorResult(e.getMessage());
+            }
+        });
+    }
+
+    private void formatDominatorNode(StringBuilder sb, HeapDumpService.DominatorNode node, int indent) {
+        sb.append("  ".repeat(indent));
+        sb.append(String.format("[%d] %s (shallow: %d, retained: %d)\n",
+                node.instanceId, node.className, node.shallowSize, node.retainedSize));
+        for (HeapDumpService.DominatorNode child : node.children) {
+            formatDominatorNode(sb, child, indent + 1);
+        }
     }
 
     private String formatSummary(HeapSummary summary) {
