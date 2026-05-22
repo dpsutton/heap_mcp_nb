@@ -703,44 +703,22 @@ public class HeapDumpService {
     }
 
     private List<BigObjectInfo> getBiggestByShallowSize(int limit) {
-        // Fallback: find the biggest individual instances by iterating all instances
-        // sorted by shallow size. Less useful than retained size but works when
-        // retained size computation fails.
-        java.util.PriorityQueue<Instance> topN = new java.util.PriorityQueue<>(
-                limit + 1, Comparator.comparingLong(Instance::getSize));
-        java.util.Iterator<Instance> iter = heap.getAllInstancesIterator();
-        while (iter.hasNext()) {
-            Instance inst = iter.next();
-            topN.add(inst);
-            if (topN.size() > limit) topN.poll();
-        }
-        List<Instance> sorted = new ArrayList<>(topN);
-        sorted.sort(Comparator.comparingLong(Instance::getSize).reversed());
-
+        // Fallback when retained size computation fails:
+        // Use class-level stats (already cached/fast) and return the first
+        // instance from the top classes by total size.
+        List<ClassStats> topClasses = getClassesByMaxInstancesSize(0, limit);
         List<BigObjectInfo> result = new ArrayList<>();
-        for (Instance inst : sorted) {
-            try {
-                String ownerClass = null;
-                long ownerId = 0;
-                List<?> refs = inst.getReferences();
-                if (refs != null) {
-                    for (Object refObj : refs) {
-                        if (refObj instanceof Value) {
-                            Instance owner = ((Value) refObj).getDefiningInstance();
-                            if (owner != null) {
-                                ownerClass = getClassName(owner);
-                                ownerId = owner.getInstanceId();
-                                break;
-                            }
-                        }
-                    }
-                }
-                result.add(new BigObjectInfo(
-                        inst.getInstanceId(), getClassName(inst),
-                        0, // retained unknown
-                        inst.getSize(),
-                        ownerClass, ownerId));
-            } catch (Exception e) { /* skip */ }
+        for (ClassStats cs : topClasses) {
+            JavaClass cls = heap.getJavaClassByName(cs.className);
+            if (cls == null) continue;
+            List<Instance> instances = cls.getInstances();
+            if (instances.isEmpty()) continue;
+            Instance inst = instances.get(0);
+            result.add(new BigObjectInfo(
+                    inst.getInstanceId(), cs.className,
+                    0, // retained unknown — note in output
+                    cs.size, // total class size as proxy
+                    null, 0));
         }
         return result;
     }

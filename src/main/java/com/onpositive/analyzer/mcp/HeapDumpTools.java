@@ -215,9 +215,20 @@ public class HeapDumpTools {
                 int limit = parseIntArg(args.get("limit"), 10);
                 List<HeapDumpService.BigObjectInfo> objects = heapDumpService.getBiggestObjectsWithOwner(limit);
                 StringBuilder sb = new StringBuilder();
+                boolean isFallback = !objects.isEmpty() && objects.get(0).retainedSize == 0;
+                if (isFallback) {
+                    sb.append("NOTE: Retained size computation failed (null GC root in dump). " +
+                              "Showing top classes by total shallow size instead. " +
+                              "Use get_classes_by_max_instances_size for more detail.\n\n");
+                }
                 for (HeapDumpService.BigObjectInfo obj : objects) {
-                    sb.append(String.format("ID: %d, Class: %s, Retained: %d, Shallow: %d",
-                            obj.instanceId, obj.className, obj.retainedSize, obj.shallowSize));
+                    if (isFallback) {
+                        sb.append(String.format("Class: %s, Total Size: %d",
+                                obj.className, obj.shallowSize));
+                    } else {
+                        sb.append(String.format("ID: %d, Class: %s, Retained: %d, Shallow: %d",
+                                obj.instanceId, obj.className, obj.retainedSize, obj.shallowSize));
+                    }
                     if (obj.ownerClass != null) {
                         sb.append(String.format(", Owner: %s (ID: %d)", obj.ownerClass, obj.ownerId));
                     }
@@ -226,12 +237,16 @@ public class HeapDumpTools {
                 if (objects.isEmpty()) {
                     return errorResult("No valid instances found");
                 }
+                String text = sb.toString();
+                if (text.isEmpty()) text = "No results";
                 return McpSchema.CallToolResult.builder()
-                        .content(List.of(new McpSchema.TextContent(sb.toString())))
+                        .content(List.of(new McpSchema.TextContent(text)))
                         .isError(false)
                         .build();
             } catch (Exception e) {
-                return errorResult(e.getMessage());
+                String msg = e.getMessage();
+                if (msg == null) msg = e.getClass().getName();
+                return errorResult(msg);
             }
         });
     }
@@ -1351,7 +1366,7 @@ public class HeapDumpTools {
 
     private McpSchema.CallToolResult errorResult(String message) {
         return McpSchema.CallToolResult.builder()
-                .content(List.of(new McpSchema.TextContent(message)))
+                .content(List.of(new McpSchema.TextContent(message != null ? message : "Unknown error")))
                 .isError(true)
                 .build();
     }
