@@ -652,7 +652,14 @@ public class HeapDumpService {
 
     public List<BigObjectInfo> getBiggestObjectsWithOwner(int limit) {
         if (heap == null) throw new IllegalStateException("Heap not loaded");
-        List<Instance> biggest = heap.getBiggestObjectsByRetainedSize(limit);
+        List<Instance> biggest;
+        try {
+            biggest = heap.getBiggestObjectsByRetainedSize(limit);
+        } catch (NullPointerException e) {
+            // NetBeans profiler NPE when GC root has null instance.
+            // Fall back to biggest classes by total instance size.
+            return getBiggestByShallowSize(limit);
+        }
         List<BigObjectInfo> result = new ArrayList<>();
         for (Instance inst : biggest) {
             try {
@@ -682,6 +689,49 @@ public class HeapDumpService {
             } catch (Exception e) {
                 // skip
             }
+        }
+        return result;
+    }
+
+    private List<BigObjectInfo> getBiggestByShallowSize(int limit) {
+        // Fallback: find the biggest individual instances by iterating all instances
+        // sorted by shallow size. Less useful than retained size but works when
+        // retained size computation fails.
+        java.util.PriorityQueue<Instance> topN = new java.util.PriorityQueue<>(
+                limit + 1, Comparator.comparingLong(Instance::getSize));
+        java.util.Iterator<Instance> iter = heap.getAllInstancesIterator();
+        while (iter.hasNext()) {
+            Instance inst = iter.next();
+            topN.add(inst);
+            if (topN.size() > limit) topN.poll();
+        }
+        List<Instance> sorted = new ArrayList<>(topN);
+        sorted.sort(Comparator.comparingLong(Instance::getSize).reversed());
+
+        List<BigObjectInfo> result = new ArrayList<>();
+        for (Instance inst : sorted) {
+            try {
+                String ownerClass = null;
+                long ownerId = 0;
+                List<?> refs = inst.getReferences();
+                if (refs != null) {
+                    for (Object refObj : refs) {
+                        if (refObj instanceof Value) {
+                            Instance owner = ((Value) refObj).getDefiningInstance();
+                            if (owner != null) {
+                                ownerClass = getClassName(owner);
+                                ownerId = owner.getInstanceId();
+                                break;
+                            }
+                        }
+                    }
+                }
+                result.add(new BigObjectInfo(
+                        inst.getInstanceId(), getClassName(inst),
+                        0, // retained unknown
+                        inst.getSize(),
+                        ownerClass, ownerId));
+            } catch (Exception e) { /* skip */ }
         }
         return result;
     }
@@ -749,11 +799,15 @@ public class HeapDumpService {
         List<PathElement> path = new ArrayList<>();
         Instance current = instance;
         int maxDepth = 200;
-        while (current != null && path.size() < maxDepth) {
-            path.add(new PathElement(current.getInstanceId(), getClassName(current)));
-            Instance next = current.getNearestGCRootPointer();
-            if (next == null || next.getInstanceId() == current.getInstanceId()) break;
-            current = next;
+        try {
+            while (current != null && path.size() < maxDepth) {
+                path.add(new PathElement(current.getInstanceId(), getClassName(current)));
+                Instance next = current.getNearestGCRootPointer();
+                if (next == null || next.getInstanceId() == current.getInstanceId()) break;
+                current = next;
+            }
+        } catch (NullPointerException e) {
+            // NetBeans profiler NPE when GC root has null instance — return partial path
         }
 
         // Check if the end of the chain is a GC root

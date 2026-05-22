@@ -115,8 +115,8 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                Number fromObj = (Number) args.get("from");
-                Number toObj = (Number) args.get("to");
+                Number fromObj = (Number) parseOptionalNumber(args, "from");
+                Number toObj = (Number) parseOptionalNumber(args, "to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
                 int to = (toObj != null) ? toObj.intValue() : 50;
 
@@ -167,8 +167,8 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                Number fromObj = (Number) args.get("from");
-                Number toObj = (Number) args.get("to");
+                Number fromObj = (Number) parseOptionalNumber(args, "from");
+                Number toObj = (Number) parseOptionalNumber(args, "to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
                 int to = (toObj != null) ? toObj.intValue() : 50;
 
@@ -313,8 +313,8 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                Number fromObj = (Number) args.get("from");
-                Number toObj = (Number) args.get("to");
+                Number fromObj = (Number) parseOptionalNumber(args, "from");
+                Number toObj = (Number) parseOptionalNumber(args, "to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
                 int to = (toObj != null) ? toObj.intValue() : 50;
 
@@ -515,8 +515,8 @@ public class HeapDumpTools {
             Map<String, Object> args = request.arguments();
             try {
                 long id = parseLongArg(args.get("id"));
-                Number fromObj = (Number) args.get("from");
-                Number toObj = (Number) args.get("to");
+                Number fromObj = (Number) parseOptionalNumber(args, "from");
+                Number toObj = (Number) parseOptionalNumber(args, "to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
                 int to = (toObj != null) ? toObj.intValue() : 50;
 
@@ -575,8 +575,8 @@ public class HeapDumpTools {
             Map<String, Object> args = request.arguments();
             try {
                 String regexp = (String) args.get("regexp");
-                Number fromObj = (Number) args.get("from");
-                Number toObj = (Number) args.get("to");
+                Number fromObj = (Number) parseOptionalNumber(args, "from");
+                Number toObj = (Number) parseOptionalNumber(args, "to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
                 int to = (toObj != null) ? toObj.intValue() : 50;
 
@@ -682,7 +682,7 @@ public class HeapDumpTools {
             Map<String, Object> args = request.arguments();
             try {
                 String query = (String) args.get("query");
-                Number maxResultsObj = (Number) args.get("max_results");
+                Number maxResultsObj = (Number) parseOptionalNumber(args, "max_results");
                 int maxResults = (maxResultsObj != null) ? maxResultsObj.intValue() : 100;
 
                 String result = heapDumpService.executeOql(query, maxResults);
@@ -767,8 +767,8 @@ public class HeapDumpTools {
             Map<String, Object> args = request.arguments();
             try {
                 long id = parseLongArg(args.get("id"));
-                Number fromObj = (Number) args.get("from");
-                Number toObj = (Number) args.get("to");
+                Number fromObj = (Number) parseOptionalNumber(args, "from");
+                Number toObj = (Number) parseOptionalNumber(args, "to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
                 int to = (toObj != null) ? toObj.intValue() : 50;
 
@@ -888,8 +888,8 @@ public class HeapDumpTools {
             Map<String, Object> args = request.arguments();
             try {
                 String className = (String) args.get("class_name");
-                Number fromObj = (Number) args.get("from");
-                Number toObj = (Number) args.get("to");
+                Number fromObj = (Number) parseOptionalNumber(args, "from");
+                Number toObj = (Number) parseOptionalNumber(args, "to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
                 int to = (toObj != null) ? toObj.intValue() : 50;
 
@@ -995,8 +995,8 @@ public class HeapDumpTools {
         return new SyncToolSpecification(tool, (exchange, request) -> {
             Map<String, Object> args = request.arguments();
             try {
-                Number fromObj = args != null ? (Number) args.get("from") : null;
-                Number toObj = args != null ? (Number) args.get("to") : null;
+                Number fromObj = args != null ? (Number) parseOptionalNumber(args, "from") : null;
+                Number toObj = args != null ? (Number) parseOptionalNumber(args, "to") : null;
                 Number maxFramesObj = args != null ? (Number) args.get("max_frames") : null;
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
                 int to = (toObj != null) ? toObj.intValue() : 50;
@@ -1061,8 +1061,8 @@ public class HeapDumpTools {
             Map<String, Object> args = request.arguments();
             try {
                 long id = parseLongArg(args.get("id"));
-                Number fromObj = (Number) args.get("from");
-                Number toObj = (Number) args.get("to");
+                Number fromObj = (Number) parseOptionalNumber(args, "from");
+                Number toObj = (Number) parseOptionalNumber(args, "to");
                 int from = (fromObj != null) ? fromObj.intValue() : 0;
                 int to = (toObj != null) ? toObj.intValue() : 50;
 
@@ -1314,6 +1314,21 @@ public class HeapDumpTools {
                 return errorResult(e.getMessage());
             }
         });
+    }
+
+    private static Object parseOptionalNumber(Map<String, Object> args, String key) {
+        if (args == null) return null;
+        Object value = args.get(key);
+        if (value == null) return null;
+        if (value instanceof Number) return value;
+        if (value instanceof String) {
+            try { return Long.parseLong((String) value); }
+            catch (NumberFormatException e) {
+                try { return Double.parseDouble((String) value); }
+                catch (NumberFormatException e2) { return null; }
+            }
+        }
+        return null;
     }
 
     private static long parseLongArg(Object value) {
