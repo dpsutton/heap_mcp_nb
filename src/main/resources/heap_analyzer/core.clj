@@ -6,6 +6,9 @@
 ;; The HeapDumpService instance — set by Java before this ns is loaded
 (def ^:dynamic *service* nil)
 
+;; Maximum string length for resolve-value truncation (not for explicit `string` calls)
+(def ^:dynamic *max-string-length* 200)
+
 ;; === Internal helpers ===
 
 (defn- get-heap []
@@ -52,7 +55,10 @@
     (let [cn (class-name inst)]
       (case cn
         "java.lang.String"
-        (try (.getStringValue *service* (.getInstanceId inst))
+        (try (let [s (.getStringValue *service* (.getInstanceId inst))]
+               (if (and s (> (.length s) *max-string-length*))
+                 (str (.substring s 0 *max-string-length*) "...")
+                 s))
              (catch Exception _ nil))
 
         "clojure.lang.Keyword"
@@ -216,6 +222,14 @@
    (let [classes (.getJavaClassesByRegExpPaginated *service* regexp (int from) (int to))]
      (vec (for [c classes]
             {:name (.getName c) :instances (.getInstancesCount c)})))))
+
+(defn class-histogram
+  "Classes sorted by total size. Returns [{:class ... :count ... :size ...}]"
+  ([] (class-histogram 0 20))
+  ([from to]
+   (let [stats (.getClassesByMaxInstancesSize *service* (int from) (int to))]
+     (vec (for [s stats]
+            {:class (.className s) :count (.instanceCount s) :size (.size s)})))))
 
 (defn- collection-count
   "Try to read the count/size of a known collection type. Returns nil if unknown."

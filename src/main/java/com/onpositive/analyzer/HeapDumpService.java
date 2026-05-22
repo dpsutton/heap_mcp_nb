@@ -143,8 +143,13 @@ public class HeapDumpService {
         String className = getClassName(instance);
         try {
             switch (className) {
-                case "java.lang.String":
-                    return "\"" + getStringValue(instance.getInstanceId()) + "\"";
+                case "java.lang.String": {
+                    String s = getStringValue(instance.getInstanceId());
+                    if (s != null && s.length() > 200) {
+                        s = s.substring(0, 200) + "...";
+                    }
+                    return "\"" + s + "\"";
+                }
                 case "java.lang.Long":
                 case "java.lang.Integer":
                 case "java.lang.Short":
@@ -484,6 +489,18 @@ public class HeapDumpService {
                 int len = values.size();
                 while (len > 0 && values.get(len - 1) == null) len--;
                 return new ArrayBacking(values.subList(0, len), len);
+            }
+        }
+
+        if (className.contains("SubVector")) {
+            Object v = instance.getValueOfField("v");
+            Object startObj = instance.getValueOfField("start");
+            Object endObj = instance.getValueOfField("end");
+            if (v instanceof Instance) {
+                ArrayBacking underlying = resolveArrayBacking((Instance) v);
+                int start = (startObj instanceof Number) ? ((Number) startObj).intValue() : 0;
+                int end = (endObj instanceof Number) ? ((Number) endObj).intValue() : underlying.length;
+                return new ArrayBacking(underlying.values.subList(start, Math.min(end, underlying.length)), end - start);
             }
         }
 
