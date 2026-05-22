@@ -667,14 +667,8 @@ public class HeapDumpService {
             var future = java.util.concurrent.CompletableFuture.supplyAsync(
                     () -> heap.getBiggestObjectsByRetainedSize(limit));
             biggest = future.get(120, java.util.concurrent.TimeUnit.SECONDS);
-        } catch (java.util.concurrent.TimeoutException e) {
-            return getBiggestByShallowSize(limit);
-        } catch (java.util.concurrent.ExecutionException e) {
-            if (e.getCause() instanceof NullPointerException) {
-                return getBiggestByShallowSize(limit);
-            }
-            throw new RuntimeException(e.getCause());
         } catch (Exception e) {
+            // Timeout, NPE on null GC roots, NoSuchElementException, etc.
             return getBiggestByShallowSize(limit);
         }
         List<BigObjectInfo> result = new ArrayList<>();
@@ -717,16 +711,24 @@ public class HeapDumpService {
         List<ClassStats> topClasses = getClassesByMaxInstancesSize(0, limit);
         List<BigObjectInfo> result = new ArrayList<>();
         for (ClassStats cs : topClasses) {
-            JavaClass cls = heap.getJavaClassByName(cs.className);
-            if (cls == null) continue;
-            List<Instance> instances = cls.getInstances();
-            if (instances.isEmpty()) continue;
-            Instance inst = instances.get(0);
-            result.add(new BigObjectInfo(
-                    inst.getInstanceId(), cs.className,
-                    0, // retained unknown — note in output
-                    cs.size, // total class size as proxy
-                    null, 0));
+            try {
+                JavaClass cls = heap.getJavaClassByName(cs.className);
+                if (cls == null) continue;
+                List<Instance> instances = cls.getInstances();
+                if (instances == null || instances.isEmpty()) continue;
+                Instance inst = instances.get(0);
+                result.add(new BigObjectInfo(
+                        inst.getInstanceId(), cs.className,
+                        0, // retained unknown — note in output
+                        cs.size, // total class size as proxy
+                        null, 0));
+            } catch (Exception e) {
+                // Skip classes that can't be queried
+                result.add(new BigObjectInfo(
+                        0, cs.className,
+                        0, cs.size,
+                        null, 0));
+            }
         }
         return result;
     }
