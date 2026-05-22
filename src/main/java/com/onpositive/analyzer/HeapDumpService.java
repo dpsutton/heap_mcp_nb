@@ -43,6 +43,15 @@ public class HeapDumpService {
         if (!heapFile.exists()) {
             throw new IOException("Heap dump file not found: " + filePath);
         }
+        // Clear previous state so old heap can be GC'd
+        if (heap != null) {
+            heap = null;
+            oqlEngine = null;
+            classesSortedByCount = null;
+            classesSortedBySize = null;
+            classesByRegexp = new LRUCache<>(10);
+            System.gc(); // hint to release memory-mapped buffers
+        }
         heap = HeapFactory.createHeap(heapFile);
         return heap.getSummary();
     }
