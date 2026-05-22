@@ -663,10 +663,18 @@ public class HeapDumpService {
         if (heap == null) throw new IllegalStateException("Heap not loaded");
         List<Instance> biggest;
         try {
-            biggest = heap.getBiggestObjectsByRetainedSize(limit);
-        } catch (NullPointerException e) {
-            // NetBeans profiler NPE when GC root has null instance.
-            // Fall back to biggest classes by total instance size.
+            // Run with a timeout — retained size computation can take 10+ minutes on large heaps
+            var future = java.util.concurrent.CompletableFuture.supplyAsync(
+                    () -> heap.getBiggestObjectsByRetainedSize(limit));
+            biggest = future.get(120, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            return getBiggestByShallowSize(limit);
+        } catch (java.util.concurrent.ExecutionException e) {
+            if (e.getCause() instanceof NullPointerException) {
+                return getBiggestByShallowSize(limit);
+            }
+            throw new RuntimeException(e.getCause());
+        } catch (Exception e) {
             return getBiggestByShallowSize(limit);
         }
         List<BigObjectInfo> result = new ArrayList<>();
