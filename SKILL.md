@@ -241,6 +241,8 @@ The `execute_clojure` tool runs Clojure expressions in-process with full access 
 (retained-breakdown id n)  ; → [{:class ... :size ... :count ...} ...]
 (dominator-tree id depth max-children)
 (find-path from-id to-id)
+(class-histogram from to)  ; → [{:class ... :count ... :size ...}] sorted by total size
+(instance-ids "class" from to) ; → [id1 id2 ...] fast, no size computation
 ```
 
 **Convenience helpers:**
@@ -254,6 +256,12 @@ The `execute_clojure` tool runs Clojure expressions in-process with full access 
 (resolve-value inst) ; Decode a heap Instance: String/Keyword/boxed→value, else nil
 (keyword-name id)    ; Read a Clojure keyword's text
 ```
+
+### String truncation
+
+Inline-decoded strings (in `fields`, `entries`, `elements`, `describe`) are truncated to 200 characters by default. This prevents multi-MB strings from exploding tool output. The explicit `(string id)` function returns the full untruncated string.
+
+To change the limit in Clojure: `(set! *max-string-length* 500)` or `(binding [*max-string-length* 1000] ...)`.
 
 ### Example patterns
 
@@ -282,9 +290,19 @@ The `execute_clojure` tool runs Clojure expressions in-process with full access 
 ;; Batch describe: resolve multiple instances at once
 (describe-all [id1 id2 id3])
 
+;; Class histogram — where is the memory?
+(class-histogram 0 20)
+;; => [{:class "byte[]" :count 11891538 :size 389411986} ...]
+
+;; Fast scan: find biggest ArrayLists by count (no retained size needed)
+(->> (instance-ids "java.util.ArrayList" 0 5000)
+     (mapv (fn [id] {:id id :count (field id :size)}))
+     (sort-by :count >)
+     (take 10))
+
 ;; Custom: group instances by a field value
-(->> (instances "com.example.MyClass" 0 1000)
-     (group-by #(field (:id %) :type))
+(->> (instance-ids "com.example.MyClass" 0 1000)
+     (group-by #(field % :type))
      (map (fn [[k vs]] [k (count vs)]))
      (into {}))
 
