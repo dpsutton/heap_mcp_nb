@@ -121,9 +121,20 @@
        :fields (fields id)})))
 
 (defn field
-  "Get a single field value from an instance. Shortcut for (get (fields id) :field-name)."
+  "Get a single field value from an instance. Reads only the requested field,
+   not all fields — much faster than (get (fields id) :name) for scanning."
   [id field-name]
-  (get (fields id) (if (keyword? field-name) field-name (keyword field-name))))
+  (let [inst (.getInstanceByID (get-heap) (long id))
+        fname (if (keyword? field-name) (name field-name) (str field-name))]
+    (when inst
+      (let [raw (.getValueOfField inst fname)]
+        (cond
+          (instance? Instance raw)
+          (let [resolved (resolve-value raw)]
+            (if (some? resolved) resolved {:id (.getInstanceId ^Instance raw) :class (class-name raw)}))
+
+          (string? raw) (parse-primitive raw)
+          :else raw)))))
 
 (defn string
   "Decode a java.lang.String instance to text."
