@@ -188,13 +188,26 @@
             {:id (.instanceId r) :class (.className r)})))))
 
 (defn instances
-  "Get instances of a class by name."
+  "Get instances of a class by name. Returns vec of {:id :class :size :retained}."
   ([class-name] (instances class-name 0 50))
   ([class-name from to]
    (let [insts (.getInstancesByClass *service* class-name (int from) (int to))]
      (vec (for [i insts]
             {:id (.instanceId i) :class (.className i)
              :size (.size i) :retained (.retainedSize i)})))))
+
+(defn instance-ids
+  "Fast: get just instance IDs for a class. No size computation.
+   Use with (field id :some-field) for fast scanning."
+  ([class-name] (instance-ids class-name 0 50))
+  ([class-name from to]
+   (let [cls (.getJavaClassByName (.getHeap *service*) class-name)]
+     (when cls
+       (let [all (.getInstances cls)
+             safe-to (min to (.size all))
+             safe-from (min from safe-to)]
+         (vec (for [^Instance inst (.subList all safe-from safe-to)]
+                (.getInstanceId inst))))))))
 
 (defn classes-matching
   "Find classes matching a regex."
