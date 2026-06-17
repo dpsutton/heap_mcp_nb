@@ -53,7 +53,83 @@ public class HeapDumpService {
             System.gc(); // hint to release memory-mapped buffers
         }
         heap = HeapFactory.createHeap(heapFile);
+        sanitizeGCRoots();
         return heap.getSummary();
+    }
+
+    /**
+     * Work around corrupt/truncated heap dumps that contain a GC root whose
+     * referent instance is absent from the dump (seen as a "sticky class" root
+     * whose {@code getInstance()} returns null). The NetBeans library's lazy
+     * retained-size computation ({@code getBiggestObjectsByRetainedSize},
+     * {@code Instance.getRetainedSize}) walks every GC root and NPEs on such a
+     * dangling root, poisoning ALL retained-size queries for the whole heap
+     * with a stack-less NullPointerException ("null GC root in dump").
+     *
+     * We reflectively remove any unresolvable root from the library's internal
+     * {@code HprofGCRoots.gcRootsList} BEFORE any computation runs, so the
+     * dominator/retained-size machinery completes normally. Dropping a single
+     * dangling root has negligible effect on retained sizes (it anchors nothing
+     * resolvable) and is far better than losing retained sizes entirely.
+     *
+     * Best-effort: if the internal layout differs, we log and continue — callers
+     * already fall back to shallow size if retained computation still fails.
+     */
+    private void sanitizeGCRoots() {
+        if (heap == null) return;
+        try {
+            Collection<GCRoot> roots = heap.getGCRoots();
+            if (roots == null) return;
+            int dangling = 0;
+            for (GCRoot r : roots) {
+                if (r.getInstance() == null) dangling++;
+            }
+            if (dangling == 0) return;
+
+            // Reach the library internals: HprofHeap.gcRoots -> HprofGCRoots
+            java.lang.reflect.Field gcRootsField = heap.getClass().getDeclaredField("gcRoots");
+            gcRootsField.setAccessible(true);
+            Object hprofGCRoots = gcRootsField.get(heap);
+
+            // Build a filtered, mutable copy of the root list (the original is
+            // immutable, and getGCRoots() returns it directly).
+            java.lang.reflect.Field listField = hprofGCRoots.getClass().getDeclaredField("gcRootsList");
+            listField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            List<GCRoot> backingList = (List<GCRoot>) listField.get(hprofGCRoots);
+            List<GCRoot> cleanList = new ArrayList<>(backingList.size());
+            int removed = 0;
+            for (GCRoot r : backingList) {
+                if (r.getInstance() == null) { removed++; continue; }
+                cleanList.add(r);
+            }
+            listField.set(hprofGCRoots, cleanList);
+
+            // The instance-keyed lookup map (HprofGCRoots.gcRoots) is built lazily
+            // by iterating roots and calling root.getInstance().getInstanceId() —
+            // which is the exact NPE site (HprofGCRoots.getGCRoot, line 96). Pre-
+            // build it ourselves from the clean list so the library never trips
+            // over the dangling root. Map<Long, GCRoot> here; thread-object roots
+            // have their own separate map and are unaffected.
+            java.lang.reflect.Field mapField = hprofGCRoots.getClass().getDeclaredField("gcRoots");
+            mapField.setAccessible(true);
+            if (mapField.get(hprofGCRoots) == null) {
+                Map<Long, GCRoot> clean = new HashMap<>(cleanList.size() * 2);
+                for (GCRoot r : cleanList) {
+                    Instance i = r.getInstance();
+                    if (i != null) clean.put(i.getInstanceId(), r);
+                }
+                mapField.set(hprofGCRoots, clean);
+            }
+
+            System.err.println("[heap-analyzer] sanitizeGCRoots: removed " + removed
+                    + " dangling GC root(s) of " + dangling + " detected; retained-size enabled.");
+        } catch (Throwable t) {
+            // Non-fatal: retained-size queries will just fall back to shallow size.
+            System.err.println("[heap-analyzer] sanitizeGCRoots: could not sanitize dangling GC roots ("
+                    + t.getClass().getSimpleName() + ": " + t.getMessage() + "); "
+                    + "retained-size may be unavailable for this dump.");
+        }
     }
 
     public List<ClassStats> getClassesByMaxInstancesCount(int from, int to) {
