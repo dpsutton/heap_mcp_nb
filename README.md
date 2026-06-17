@@ -1,195 +1,163 @@
 # Java Heap Dump MCP Server
 
-A Model Context Protocol (MCP) server for analyzing Java heap dump files (.hprof). This project provides a set of tools that allow AI assistants to analyze Java heap dumps through a standardized MCP interface.
-Based on NetBeans Profiler library as a backend.
+An [MCP](https://modelcontextprotocol.io) server that lets an AI assistant analyze Java `.hprof` heap dumps — built for diagnosing OOMs in JVM apps, with first-class support for **Clojure** data structures (Metabase, in particular).
 
-## Features
+Point Claude at a heap dump and ask *"what's eating the heap?"* — it loads the dump, finds the dominant object, walks the reference graph, and decodes the Clojure data along the way. Backed by the NetBeans Profiler heap-analysis library.
 
-- **Load Heap Dumps** - Parse and load .hprof heap dump files
-- **Query Classes** - Get classes sorted by instance count/size, search by name, or use regex patterns with pagination
-- **Analyze Instances** - Find biggest objects by retained size, get instance details with field values
-- **References** - Get all references to an instance
-- **GC Root Analysis** - View garbage collection roots with pagination
-- **Heap Summary** - Get overview statistics of the heap
-- **System Properties** - Access JVM system properties from the heap dump
-- **OQL Support** - Execute Object Query Language queries on the heap
-- **Reflection-based Tools** - Tools are automatically generated from annotated methods
+## Why this exists (for Metabase devs)
 
-## Architecture
+A Metabase heap dump is full of `PersistentVector`, `PersistentArrayMap`, `PersistentHashMap`, `Keyword`, and intern'd `String` objects. Generic heap tools (MAT, jhat) show you the raw object trie — thousands of `PersistentVector$Node` boxes — and leave you to reconstruct the actual data by hand.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      MCP Client (AI)                        │
-└─────────────────────────┬───────────────────────────────────┘
-                          │ MCP Protocol (JSON-RPC)
-┌─────────────────────────▼───────────────────────────────────┐
-│                    MCP Server                               │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │              HeapDumpTools (MCP Adapter)           │    │
-│  └─────────────────────────┬─────────────────────────┘    │
-└────────────────────────────┼────────────────────────────────┘
-                             │
-┌────────────────────────────▼────────────────────────────────┐
-│                 HeapDumpService (Core)                     │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │         NetBeans Profiler Heap Analysis API          │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+This server understands those types:
+
+- **`Keyword`s, `String`s, and boxed primitives are decoded inline** — a field shows `:source/native` or `"SELECT * FROM ..."`, not an instance ID you have to chase.
+- **`PersistentVector` / `PersistentArrayMap` / `PersistentHashMap` are flattened** — `get_map_entries` / `get_array_elements` return real key/value pairs, walking the Clojure trie for you.
+- **`execute_clojure` runs Clojure *in-process against the dump*** — so you can script the analysis in the same language the data was written in, composing many lookups into one call.
+
+The result: instead of "instance 0x7f… points to instance 0x8a…", you get `{:card-id 42, :dataset_query {:type :query, ...}}`.
+
+## Quick start
+
+```bash
+mvn clean package          # builds target/heap_mcp_nb-1.0-SNAPSHOT.jar (shaded, runnable)
 ```
 
-## Available Tools
+Register it with your MCP client. For **Claude Code**, drop a `.mcp.json` in your working directory:
 
-| Tool | Description |
-|------|-------------|
-| `load_heap` | Load a .hprof heap dump file |
-| `get_classes_by_max_instances_count` | List classes sorted by instance count (descending) with pagination |
-| `get_classes_by_max_instances_size` | List classes sorted by total instance size (descending) with pagination |
-| `get_classes_by_regexp` | Search classes using regex with pagination |
-| `get_class_by_name` | Get details of a specific class including fields, static fields, and superclass |
-| `get_class_by_id` | Get class details by internal ID including fields, static fields, and superclass |
-| `get_instance_by_id` | Get instance details including field values and object references |
-| `get_all_references` | Get all references to an instance with pagination |
-| `get_biggest_objects` | Find largest objects by retained size |
-| `get_gc_roots` | View GC root references with pagination (from, to args, defaults 0-50) |
-| `get_gc_roots_paginated` | View GC roots with pagination, including kind and instance info |
-| `get_summary` | Get heap summary statistics |
-| `get_system_properties` | Access JVM system properties |
-| `execute_oql` | Execute OQL queries |
-| `analyze_heap_dump` | Analyze and return top classes by instance count |
+```json
+{
+  "mcpServers": {
+    "heap-analyzer": {
+      "command": "java",
+      "args": ["-jar", "/absolute/path/to/heap_mcp_nb-1.0-SNAPSHOT.jar"]
+    }
+  }
+}
+```
+
+Then `/mcp` to enable it, and ask:
+
+> Load the heap dump at `./crash.hprof` and tell me what's retaining the most memory.
+
+A heap dump can be tens of GB on disk; give the JVM headroom with `-Xmx` (e.g. `java -Xmx8g -jar …`) for large dumps.
+
+> **Methodology:** [`SKILL.md`](SKILL.md) is a ready-to-use Claude skill that codifies the full workflow — load → find the dominator → trace the graph → decode the data. Start there if you want the AI to drive the investigation.
+
+## What it can do
+
+The server exposes ~35 tools. The ones you'll actually reach for:
+
+### Orient
+| Tool | Use |
+|------|-----|
+| `load_heap` | Load a `.hprof` file |
+| `get_summary` | Total instances + bytes |
+| `get_system_properties` | JVM/app identity from the dump |
+| `get_biggest_objects` | Top N objects by **retained** size — usually reveals the OOM culprit immediately |
+
+### Find the dominator
+| Tool | Use |
+|------|-----|
+| `get_retained_breakdown` | What classes make up an object's retained set (e.g. "600 MB Strings, 200 MB byte[]") |
+| `get_dominator_tree` | MAT-style tree of what an object retains, sorted by retained size |
+| `find_path` | Reference chain between two specific objects |
+| `get_all_references` | What points *to* an object (what's keeping it alive) |
+| `get_gc_root_for` | Path from an object to its nearest GC root, with thread name + stack trace |
+
+### Inspect classes & instances
+| Tool | Use |
+|------|-----|
+| `get_classes_by_max_instances_count` / `_size` | Class histograms (paginated) |
+| `get_classes_by_regexp` | Regex class-name search |
+| `get_class_by_name` / `get_class_by_id` | Class details: fields, statics, superclass |
+| `get_instance_by_id` | Full instance: class, size, retained size, decoded fields |
+| `get_instances_by_class` | Instances of a class with IDs and sizes |
+
+### Read the data (Clojure-aware)
+| Tool | Use |
+|------|-----|
+| `get_string_value` / `get_string_values_bulk` | Decode `String`s (Latin-1 + compact UTF-16) |
+| `get_byte_array_contents` | `byte[]` as text or hex |
+| `get_array_elements` / `get_array_element` | `Object[]`, `ArrayList`, **`PersistentVector`** elements |
+| `get_map_entries` | Entries from `HashMap`, `LinkedHashMap`, **`PersistentArrayMap`**, **`PersistentHashMap`** — keys/values auto-decoded |
+| `get_threads` | All threads with stack traces |
+
+### Script it
+| Tool | Use |
+|------|-----|
+| `execute_oql` | OQL queries (bootstrap classes; use `get_instances_by_class` for app classes) |
+| `execute_clojure` | **Evaluate Clojure against the heap** (see below) |
+
+## `execute_clojure` — scripting the analysis
+
+Once you know what you're looking for, `execute_clojure` lets you compose many lookups into a single call, returning Clojure data. It runs in-process with the heap loaded, exposing thin primitives plus convenience helpers:
+
+```clojure
+;; Top 5 biggest objects, each with all fields resolved (replaces ~15 tool calls)
+(->> (biggest 5)
+     (mapv #(assoc % :fields (fields (:id %)))))
+
+;; Read a PersistentVector directly — the trie is flattened for you
+(elements pv-id 0 20)
+
+;; A HashMap / Clojure map with keys and values auto-decoded
+(entries some-map-id 0 20)
+;; => [{:key :source/native :val "SELECT ..."} {:key :card-id :val 42} ...]
+
+;; Single field, no boilerplate
+(field card-id :dataset_query)
+
+;; Where's the memory? (no retained-size computation needed)
+(class-histogram 0 20)
+;; => [{:class "byte[]" :count 11891538 :size 389411986} ...]
+
+;; GC-root chain with thread context
+(let [r (gc-root suspicious-id)]
+  {:thread (:thread r), :stack (take 10 (:stack r)), :object (fields suspicious-id)})
+```
+
+Primitives like `Keyword`/`String`/boxed numbers are decoded to real Clojure values; other references come back as `{:id … :class …}` for further lookup. Inline-decoded strings truncate at 200 chars by default (`(binding [*max-string-length* 1000] …)` to change it); `(string id)` returns the full value.
+
+See the **Clojure Eval** section of [`SKILL.md`](SKILL.md) for the complete function reference and more patterns.
 
 ## Requirements
 
-- Java 17 or higher
+- Java 17+
 - Maven 3.6+
 
-## Installing
-* Just download jar from the releases section
-  
-## Building
-
-```bash
-mvn clean package
-```
-
-This creates a shaded JAR at `target/heap_mcp_nb-1.0-SNAPSHOT-shaded.jar` with all dependencies included.
-
-## Running
-
-### As MCP Server (STDIO)
-
-```bash
-java -jar target/heap_mcp_nb-0.0.1.jar
-```
-
-The server communicates via STDIO, making it compatible with MCP clients like Claude Desktop or opencode.
-
-### Configuration
-
-#### For opencode
-
-Add to your `opencode.json`:
-
-```json
-{
-  "mcpServers": {
-    "heap-analyzer": {
-      "command": "java",
-      "args": ["-jar", "${workspace}/target/heap_mcp_nb-0.0.1.jar"],
-      "env": {}
-    }
-  }
-}
-```
-
-#### For Claude Desktop
-
-```json
-{
-  "mcpServers": {
-    "heap-analyzer": {
-      "command": "java",
-      "args": ["-jar", "path/to/heap_mcp_nb-0.0.1.jar"],
-      "env": {}
-    }
-  }
-}
-```
-
-### Running Tests
+## Running tests
 
 ```bash
 mvn test
+mvn test -Dtest=ClojureEvalUnitTest      # a single test
 ```
 
-To run specific tests:
-
-```bash
-mvn test -Dtest=HeapDumpMcpTest
-mvn test -Dtest=McpClientIntegrationTest
-```
-
-## Usage Examples
-
-In tools like Trae, OpenCode or Qwen CLI you can just point to .hrpof file with your heap dump and ask smth like `Find possible problems in this heap dump`
-
-### Using with MCP Client
-
-```java
-// Create service and tools
-HeapDumpService service = new HeapDumpService();
-HeapDumpTools tools = new HeapDumpTools(service);
-
-// Load heap dump
-CallToolRequest loadRequest = new CallToolRequest("load_heap", Map.of("file_path", "/path/to/heapdump.hprof"));
-tools.loadHeapTool().callHandler().apply(null, loadRequest);
-
-// Get top classes by instance count
-CallToolRequest classesRequest = new CallToolRequest("get_classes_by_max_instances_count", Map.of("from", 0, "to", 50));
-CallToolResult result = tools.getClassesByMaxInstancesCountTool().callHandler().apply(null, classesRequest);
-```
-
-### Tool Response Format
-
-Most tools return results as newline-separated text. For example:
+## Project layout
 
 ```
-get_class_by_name:
-Name: java.util.HashMap
-Instances: 152
-Total Size: 24320
-Superclass: java.util.AbstractMap
-Static Fields:
-  int DEFAULT_INITIAL_CAPACITY = 16
-  float loadFactor = 0.75 (Instance ID: 123456789)
-Fields:
-  java.util.HashMap$Node[] table
-  int size
-  int threshold
-  float loadFactor
+HeapDumpTools          MCP adapter — maps tool calls to service methods
+  └─ HeapDumpService   core analysis over the NetBeans Profiler heap API
+ClojureEvaluator       in-process Clojure eval, backed by heap_analyzer/core.clj
+McpServerLauncher      STDIO entry point (main class)
 ```
 
-## Reflection-based Tool Factory
-
-Tools can also be created dynamically using the `ToolsFactory` class with annotations:
+Tools are generated from annotated methods via the reflection-based `ToolsFactory`
+(see `src/main/java/com/onpositive/analyzer/mcp/reflection/`):
 
 ```java
 @Tool(name = "my_tool", title = "My Tool", description = "Does something")
-public String myToolMethod(
-    @Required("param1") String param1,
-    @Default(name = "param2", value = "50") int param2) {
-    // implementation
-}
+public String myToolMethod(@Required("param1") String param1,
+                           @Default(name = "param2", value = "50") int param2) { … }
 ```
-
-See `src/main/java/com/onpositive/analyzer/mcp/reflection/` for the annotation definitions.
 
 ## Dependencies
 
-- **io.modelcontextprotocol.sdk:mcp** (1.0.0) - MCP Java SDK
-- **org.netbeans.modules:org-netbeans-lib-profiler** (RELEASE200) - Heap analysis
-- **org.netbeans.modules:org-netbeans-modules-profiler-oql** (RELEASE200) - OQL engine
-- **JUnit 5** - Testing framework
+- `io.modelcontextprotocol.sdk:mcp` — MCP Java SDK
+- `org.netbeans.modules:org-netbeans-lib-profiler` (RELEASE200) — heap analysis
+- `org.netbeans.modules:org-netbeans-modules-profiler-oql` (RELEASE200) — OQL engine
+- `org.clojure:clojure` (1.12.0) — in-process Clojure eval
+- JUnit 5 — tests
 
 ## License
 
-MIT License
+MIT
