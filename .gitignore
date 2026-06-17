@@ -61,3 +61,6 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+### NetBeans profiler heap cache (regenerated from *.hprof on each test run) ###
+*.hprof.nbcache/
